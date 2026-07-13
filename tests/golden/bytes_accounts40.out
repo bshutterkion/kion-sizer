@@ -1,0 +1,14 @@
+kion-sizer recommendation
+  calibration: reference-cur-2026-03 / aws-parquet
+
+CUR profile:
+  files:            1
+  compressed bytes: 1.0 GiB
+  aggregated PUC rows: 791000 (est. from compressed bytes)
+  peak shard:       0.8 GiB
+
+Recommended starting sizes (AWS):
+  RDS:              db.t3.medium (4 GiB RAM)
+  financials-poller ECS task: 4.0 GiB mem, 1 vCPU
+  core services:    1 task(s), 1024 cpu / 2048 MiB
+  compliance:       4 task(s), 1024 cpu / 2048 MiB

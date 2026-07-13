@@ -1,0 +1,22 @@
+{
+  "accounts": 5000,
+  "calibration_version": "reference-cur-2026-03 / aws-parquet",
+  "est_basis": "compressed bytes",
+  "est_rows": 791000,
+  "poller_mem_gib": 4,
+  "poller_vcpu": 1,
+  "raw_line_items": 0,
+  "rds_exceeds_tiers": false,
+  "rds_instance": "db.t3.medium",
+  "rds_ram_gib": 4,
+  "services": {
+    "max_accounts": 1000000,
+    "core_tasks": 2,
+    "core_cpu": 2048,
+    "core_mem_mib": 4096,
+    "compliance_tasks": 2,
+    "compliance_cpu": 4096,
+    "compliance_mem_mib": 8192
+  },
+  "shard_gib": 0.7631964981555939
+}

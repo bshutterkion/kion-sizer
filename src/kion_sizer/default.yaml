@@ -1,0 +1,41 @@
+# Calibration constants for kion-sizer, derived from a reference customer CUR
+# (AWS, parquet, March 2026). Override any of these with --config.
+calibration_version: "reference-cur-2026-03 / aws-parquet"
+
+# CUR-volume -> load constants. rows_per_gib is the AGGREGATED PUC row count
+# (post-collapse), NOT raw CUR line items. raw_to_aggregated_ratio converts a
+# raw parquet line-item count (from footers) into aggregated rows; it is
+# customer-variable (depends on resource/service/tag shape) — treat as a guide.
+rows_per_gib: 791000          # aggregated PUC rows / GiB compressed parquet (13.48M rows / 17.05 GiB reference)
+raw_to_aggregated_ratio: 8.44 # ~113.8M raw line items / 13.48M aggregated rows (reference; varies by customer)
+bytes_per_row: 1036           # on-disk PUC row size incl. indexes
+buffer_pool_fraction: 0.70           # InnoDB/Aurora buffer pool as fraction of DB RAM
+# Headroom above the largest payer-month shard: a fraction of the shard, floored.
+# 0.40 reproduces the reference headroom (~5 / 13 GiB) so the high end is unchanged;
+# the floor keeps tiny CURs from over-sizing, so small envs can land on db.t3.medium
+# (matches typical adhoc/non-prod envs, which run db.t3.medium / 4 GiB).
+buffer_pool_headroom_fraction: 0.40
+buffer_pool_headroom_floor_gib: 1
+
+# financials-poller heap (drives ECS task memory). poller_floor_gib is the real-world
+# minimum task provisioned regardless of data — adhoc envs run 4–6 GiB / 1 vCPU.
+poller_base_gib: 1.0
+poller_heap_gib_per_mrow: 0.85
+poller_headroom_fraction: 0.25
+poller_floor_gib: 4
+
+# Ordered ascending by RAM. First tier whose buffer pool covers the shard wins.
+rds_tiers:
+  - {name: "db.t3.medium",  ram_gib: 4}
+  - {name: "db.t3.large",   ram_gib: 8}
+  - {name: "db.r6g.large",  ram_gib: 16}
+  - {name: "db.r6g.xlarge", ram_gib: 32}
+  - {name: "db.r6g.2xlarge", ram_gib: 64}
+  - {name: "db.r6g.4xlarge", ram_gib: 128}
+
+# Core/compliance/cost service starting bands by account count. Starting points.
+# Values are ECS task CPU units / memory MiB / task count.
+service_bands:
+  - {max_accounts: 50,      core_tasks: 1, core_cpu: 1024, core_mem_mib: 2048, compliance_tasks: 4, compliance_cpu: 1024, compliance_mem_mib: 2048}
+  - {max_accounts: 200,     core_tasks: 2, core_cpu: 2048, core_mem_mib: 4096, compliance_tasks: 4, compliance_cpu: 4096, compliance_mem_mib: 8192}
+  - {max_accounts: 1000000, core_tasks: 2, core_cpu: 2048, core_mem_mib: 4096, compliance_tasks: 2, compliance_cpu: 4096, compliance_mem_mib: 8192}

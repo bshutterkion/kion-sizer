@@ -1,0 +1,16 @@
+# Environment-fidelity image: AWS CloudShell runs Amazon Linux 2023.
+# We deliberately do NOT preinstall uv or Python 3.12 — the test proves
+# cloudshell.sh provisions them itself, exactly as it must in CloudShell.
+FROM amazonlinux:2023
+
+# CloudShell ships curl/tar/gzip/git/python3; the bare base image needs a few
+# of those added so the starting point matches (uv's installer needs curl+tar).
+RUN dnf -y install tar gzip findutils shadow-utils >/dev/null && dnf clean all
+
+# Run as a non-root user with a real HOME (uv installs under ~/.local, like CloudShell).
+RUN useradd -m tester
+USER tester
+WORKDIR /work
+COPY --chown=tester:tester . /work
+
+ENTRYPOINT ["bash", "tests/env/run_env_test.sh", "/work"]
