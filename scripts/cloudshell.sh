@@ -231,6 +231,7 @@ main() {
   fi
 
   bootstrap_uv
+  log "# sizing… (querying RDS classes orderable in ${region:-the default region}; falls back to built-in tiers if AWS is slow)"
   ( cd "$REPO" && uv run kion-sizer "${ARGS[@]}" )
 }
 
