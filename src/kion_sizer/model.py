@@ -23,8 +23,15 @@ class Recommendation:
     shard_gib: float = 0.0
     rds: Optional[InstanceTier] = None
     rds_exceeds_tiers: bool = False
+    rds_tier_source: str = ""
     poller_mem_gib: float = 0.0
     poller_vcpu: int = 0
+    # Nearest valid AWS Fargate task the computed heap maps onto (the raw
+    # poller_mem_gib above is a requirement, not a provisionable size).
+    poller_task_mem_gib: float = 0.0
+    poller_task_vcpu: int = 0
+    poller_task_cpu_units: int = 0
+    poller_task_exceeds: bool = False
     accounts: int = 0
     services: Optional[ServiceBand] = None
     have_services: bool = False
@@ -73,6 +80,12 @@ def recommend(p, c: Config, accounts: int) -> Recommendation:
     rec.poller_mem_gib = round_half_away(poller_mem * 10) / 10
     rec.poller_vcpu = poller_vcpu(rec.poller_mem_gib)
 
+    cpu_units, mem_mib, exceeds = fargate_task(rec.poller_mem_gib, rec.poller_vcpu)
+    rec.poller_task_cpu_units = cpu_units
+    rec.poller_task_mem_gib = mem_mib / 1024
+    rec.poller_task_vcpu = cpu_units // 1024
+    rec.poller_task_exceeds = exceeds
+
     if accounts > 0:
         rec.services = pick_band(c.service_bands, accounts)
         rec.have_services = True
@@ -103,3 +116,39 @@ def poller_vcpu(mem_gib: float) -> int:
     if mem_gib <= 32:
         return 4
     return 8
+
+
+def _mib_range(lo: int, hi: int, step: int) -> list[int]:
+    return list(range(lo, hi + 1, step))
+
+
+# AWS Fargate valid task sizes (fixed platform constants — AWS exposes no API
+# for these, and they don't vary by region): cpu units -> the discrete list of
+# valid memory values (MiB). The poller's 4 GiB floor keeps us at 1 vCPU (1024)
+# or above, so the sub-1-vCPU tiers are omitted.
+_FARGATE_TASKS: list[tuple[int, list[int]]] = [
+    (1024, _mib_range(2048, 8192, 1024)),  # 1 vCPU:  2-8 GB /1
+    (2048, _mib_range(4096, 16384, 1024)),  # 2 vCPU:  4-16 GB /1
+    (4096, _mib_range(8192, 30720, 1024)),  # 4 vCPU:  8-30 GB /1
+    (8192, _mib_range(16384, 61440, 4096)),  # 8 vCPU:  16-60 GB /4
+    (16384, _mib_range(32768, 122880, 8192)),  # 16 vCPU: 32-120 GB /8
+    (32768, [61440, 122880, 249856]),  # 32 vCPU: 60, 120, 244 GB (irregular)
+]
+
+
+def fargate_task(mem_gib: float, vcpu: int) -> tuple[int, int, bool]:
+    """Snap a computed (mem_gib, vcpu) requirement to the smallest valid Fargate
+    task that provides at least that CPU and memory. Returns
+    (cpu_units, mem_mib, exceeds_largest_task).
+    """
+    req_cpu = vcpu * 1024
+    req_mem = math.ceil(mem_gib * 1024)
+    for cpu, mems in _FARGATE_TASKS:
+        if cpu < req_cpu:
+            continue
+        for mem in mems:  # ascending
+            if mem >= req_mem:
+                return cpu, mem, False
+        # memory doesn't fit this tier's max; escalate to the next (larger) CPU.
+    cpu, mems = _FARGATE_TASKS[-1]
+    return cpu, mems[-1], True

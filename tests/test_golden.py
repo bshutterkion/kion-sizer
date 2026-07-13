@@ -41,7 +41,9 @@ def _check(name, args, output):
     if os.environ.get("KION_SIZER_UPDATE_GOLDEN") == "1":
         path.write_text(output)
         return
-    assert path.exists(), f"missing golden {path}; regenerate with KION_SIZER_UPDATE_GOLDEN=1"
+    assert path.exists(), (
+        f"missing golden {path}; regenerate with KION_SIZER_UPDATE_GOLDEN=1"
+    )
     assert output == path.read_text(), f"output drift for {name}"
 
 

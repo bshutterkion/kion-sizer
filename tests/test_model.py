@@ -50,6 +50,46 @@ def test_footer_path_uses_ratio():
     assert r.est_basis == "line items / aggregation ratio"
 
 
+def test_fargate_task_rounds_mem_up_to_valid_size():
+    # 5.3 GiB / 1 vCPU -> Fargate 1 vCPU tier (2-8 GB /1) rounds up to 6 GiB.
+    cpu, mem_mib, exceeds = model.fargate_task(5.3, 1)
+    assert (cpu, mem_mib, exceeds) == (1024, 6144, False)
+
+
+def test_fargate_task_exact_value_unchanged():
+    cpu, mem_mib, exceeds = model.fargate_task(4.0, 1)
+    assert (cpu, mem_mib, exceeds) == (1024, 4096, False)
+
+
+def test_fargate_task_escalates_cpu_when_mem_exceeds_tier():
+    # 10 GiB needs > the 1 vCPU max (8 GB); even at vcpu=1 it must move to 2 vCPU.
+    cpu, mem_mib, exceeds = model.fargate_task(10.0, 1)
+    assert cpu == 2048 and mem_mib == 10240 and exceeds is False
+
+
+def test_fargate_task_uses_32vcpu_tier():
+    # 200 GiB fits the 32 vCPU tier's 244 GB (249856 MiB) top size.
+    cpu, mem_mib, exceeds = model.fargate_task(200.0, 8)
+    assert cpu == 32768 and mem_mib == 249856 and exceeds is False
+
+
+def test_fargate_task_exceeds_largest():
+    # Past 244 GB there is no larger Fargate task.
+    cpu, mem_mib, exceeds = model.fargate_task(300.0, 8)
+    assert cpu == 32768 and mem_mib == 249856 and exceeds is True
+
+
+def test_recommend_sets_valid_fargate_task():
+    c = config.default()
+    p = FakeProfile(compressed_bytes=1 << 30)
+    r = model.recommend(p, c, 0)
+    # poller floor is 4 GiB -> valid Fargate task 4 GiB / 1 vCPU.
+    assert r.poller_task_mem_gib == 4.0
+    assert r.poller_task_vcpu == 1
+    assert r.poller_task_cpu_units == 1024
+    assert r.poller_task_exceeds is False
+
+
 def test_pick_tier_exceeds():
     c = config.default()
     tier, exceeds = model.pick_tier(c.rds_tiers, 10_000)

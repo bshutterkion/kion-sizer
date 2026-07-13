@@ -52,8 +52,17 @@ def render_text(r: Recommendation) -> str:
     if r.rds_exceeds_tiers:
         rds += "  (!! exceeds known tiers — needs custom sizing/sharding review)"
     b.append(f"  RDS:              {rds} ({r.rds.ram_gib:.0f} GiB RAM)\n")
+    if r.rds_tier_source:
+        b.append(f"    instance classes: {r.rds_tier_source}\n")
     b.append(
-        f"  financials-poller ECS task: {r.poller_mem_gib:.1f} GiB mem, {r.poller_vcpu} vCPU\n"
+        f"  financials-poller heap requirement: {r.poller_mem_gib:.1f} GiB mem, {r.poller_vcpu} vCPU\n"
+    )
+    task = ""
+    if r.poller_task_exceeds:
+        task = "  (!! exceeds largest Fargate task — needs custom/EC2 sizing)"
+    b.append(
+        f"  financials-poller Fargate task: {r.poller_task_mem_gib:.0f} GiB mem, "
+        f"{r.poller_task_vcpu} vCPU ({r.poller_task_cpu_units} CPU units){task}\n"
     )
     if r.have_services:
         s = r.services
@@ -78,10 +87,15 @@ def render_json(r: Recommendation) -> str:
         "est_rows": r.est_rows,
         "poller_mem_gib": _go_float(r.poller_mem_gib),
         "poller_vcpu": r.poller_vcpu,
+        "poller_task_mem_gib": _go_float(r.poller_task_mem_gib),
+        "poller_task_vcpu": r.poller_task_vcpu,
+        "poller_task_cpu_units": r.poller_task_cpu_units,
+        "poller_task_exceeds": r.poller_task_exceeds,
         "raw_line_items": r.raw_line_items,
         "rds_exceeds_tiers": r.rds_exceeds_tiers,
         "rds_instance": r.rds.name,
         "rds_ram_gib": _go_float(r.rds.ram_gib),
+        "rds_tier_source": r.rds_tier_source,
         "shard_gib": _go_float(r.shard_gib),
     }
     if r.have_services:

@@ -59,14 +59,18 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
 | `--granularity hourly\|daily` | CUR granularity (hourly ≈ 24× the rows of daily). |
 | `--read-footers` | Exact parquet row counts from footers (local `--dir` only). |
 | `--json` | Machine-readable output. |
+| `--rds-from-aws` | Size the RDS tier against the DB instance classes actually **orderable** in `--region` (via `describe-orderable-db-instance-options` + `describe-instance-types`); falls back to the built-in tiers if AWS is unreachable. `cloudshell.sh` enables this by default. |
+| `--region R` | Region for `--rds-from-aws` (defaults to the AWS session region). |
 | `--config FILE` | Override the calibration constants (`default.yaml`). |
 
 ## What it reports
 
 - **RDS instance class** — smallest tier whose InnoDB buffer pool holds the
-  largest payer-month shard plus headroom.
-- **financials-poller ECS task** — memory + vCPU covering the per-month heap,
-  with a real-world floor.
+  largest payer-month shard plus headroom. With `--rds-from-aws` the candidate
+  classes come from what's actually orderable in the region.
+- **financials-poller** — the raw heap requirement (memory + vCPU) *and* the
+  nearest valid AWS Fargate task size to provision (Fargate only accepts
+  discrete CPU/memory combinations).
 - **core / compliance service bands** — starting ECS task counts + CPU/memory by
   account count (with `--accounts`).
 

@@ -217,6 +217,11 @@ main() {
   case "$GRAN" in hourly|daily) ARGS+=(--granularity "$GRAN") ;; esac
   [ -n "$ACCOUNTS" ] && ARGS+=(--accounts "$ACCOUNTS")
   [ "$AS_JSON" = 1 ] && ARGS+=(--json)
+  # CloudShell has creds — size the RDS tier against the classes actually
+  # orderable in this region (falls back to built-in tiers if the lookup fails).
+  ARGS+=(--rds-from-aws)
+  local region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+  [ -n "$region" ] && ARGS+=(--region "$region")
 
   if [ "$DRY_RUN" = 1 ]; then
     printf 'uv run kion-sizer'

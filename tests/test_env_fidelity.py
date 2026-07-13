@@ -22,14 +22,25 @@ _REPO = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 def test_al2023_env_fidelity():
     build = subprocess.run(
-        ["docker", "build", "-f", "tests/env/Dockerfile.al2023", "-t",
-         "kion-sizer-envtest", "."],
-        cwd=_REPO, capture_output=True, text=True,
+        [
+            "docker",
+            "build",
+            "-f",
+            "tests/env/Dockerfile.al2023",
+            "-t",
+            "kion-sizer-envtest",
+            ".",
+        ],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
     )
     assert build.returncode == 0, build.stdout + build.stderr
     run = subprocess.run(
         ["docker", "run", "--rm", "kion-sizer-envtest"],
-        cwd=_REPO, capture_output=True, text=True,
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
     )
     assert run.returncode == 0, run.stdout + run.stderr
     assert "ENV FIDELITY PASSED" in run.stdout

@@ -50,9 +50,9 @@ echo "$out" | grep -q 'S3_URI=s3://cur-bucket/reports/hourly-cur/yearMonth=20260
   || { echo "FAIL: discovery did not resolve peak month"; exit 1; }
 
 step "full script executes end-to-end (--dry-run)"
-got="$(bash scripts/cloudshell.sh --dry-run --accounts 150)"
+got="$(AWS_REGION= AWS_DEFAULT_REGION= bash scripts/cloudshell.sh --dry-run --accounts 150)"
 echo "$got"
-[ "$got" = "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150" ] \
+[ "$got" = "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --rds-from-aws" ] \
   || { echo "FAIL: unexpected resolved command"; exit 1; }
 
 step "bootstrap_uv: install uv + provision Python (>=3.12) + deps"
@@ -68,7 +68,7 @@ rec="$(uv run kion-sizer --dir /tmp/fix --accounts 150)"
 echo "$rec"
 echo "$rec" | grep -q 'kion-sizer recommendation' || { echo "FAIL: no recommendation header"; exit 1; }
 echo "$rec" | grep -q 'RDS:' || { echo "FAIL: no RDS line"; exit 1; }
-echo "$rec" | grep -q 'financials-poller ECS task' || { echo "FAIL: no poller line"; exit 1; }
+echo "$rec" | grep -q 'financials-poller Fargate task' || { echo "FAIL: no poller task line"; exit 1; }
 
 step "JSON output is valid + carries the neutral calibration marker, no caveat"
 js="$(uv run kion-sizer --dir /tmp/fix --accounts 150 --json)"

@@ -14,7 +14,5 @@ _SCRIPT = Path(__file__).parent / "test_cloudshell.sh"
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 def test_cloudshell_discovery():
-    res = subprocess.run(
-        ["bash", str(_SCRIPT)], capture_output=True, text=True
-    )
+    res = subprocess.run(["bash", str(_SCRIPT)], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr

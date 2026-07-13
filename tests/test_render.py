@@ -22,7 +22,8 @@ def _rec(accounts=40):
 def test_text_contains_key_lines():
     out = render.render_text(_rec())
     assert "RDS:              db.t3.medium (4 GiB RAM)" in out
-    assert "financials-poller ECS task: 4.0 GiB mem, 1 vCPU" in out
+    assert "financials-poller heap requirement: 4.0 GiB mem, 1 vCPU" in out
+    assert "financials-poller Fargate task: 4 GiB mem, 1 vCPU (1024 CPU units)" in out
     assert out.endswith("\n")
     assert "peak shard:       0.8 GiB" in out
 

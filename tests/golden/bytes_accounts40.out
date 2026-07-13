@@ -9,6 +9,7 @@ CUR profile:
 
 Recommended starting sizes (AWS):
   RDS:              db.t3.medium (4 GiB RAM)
-  financials-poller ECS task: 4.0 GiB mem, 1 vCPU
+  financials-poller heap requirement: 4.0 GiB mem, 1 vCPU
+  financials-poller Fargate task: 4 GiB mem, 1 vCPU (1024 CPU units)
   core services:    1 task(s), 1024 cpu / 2048 MiB
   compliance:       4 task(s), 1024 cpu / 2048 MiB

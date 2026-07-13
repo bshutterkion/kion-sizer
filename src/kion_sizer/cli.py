@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, model, profile, render
+from . import config, model, profile, rds_catalog, render
 
 
 class _UsageError(Exception):
@@ -42,6 +42,14 @@ def run(args: list[str], out) -> int:
     parser.add_argument("--granularity", default="unknown")
     parser.add_argument("--read-footers", dest="read_footers", action="store_true")
     parser.add_argument("--json", dest="as_json", action="store_true")
+    parser.add_argument(
+        "--rds-from-aws",
+        dest="rds_from_aws",
+        action="store_true",
+        help="use the DB instance classes actually orderable in --region (needs AWS creds)",
+    )
+    parser.add_argument("--region", default="")
+    parser.add_argument("--rds-engine", dest="rds_engine", default="mysql")
     try:
         ns = parser.parse_args(args)
     except _UsageError:
@@ -63,7 +71,19 @@ def run(args: list[str], out) -> int:
         print(f"error: {e}", file=out)
         return 1
 
+    tier_source = ""
+    if ns.rds_from_aws:
+        region = ns.region or None
+        try:
+            cfg.rds_tiers = rds_catalog.orderable_tiers(region, ns.rds_engine)
+            tier_source = (
+                f"orderable in {ns.region or 'default region'} ({ns.rds_engine})"
+            )
+        except Exception as e:  # noqa: BLE001 — resilience: fall back on any AWS failure
+            tier_source = f"built-in defaults (AWS lookup failed: {e})"
+
     rec = model.recommend(p, cfg, ns.accounts)
+    rec.rds_tier_source = tier_source
     if ns.as_json:
         print(render.render_json(rec), file=out)
     else:

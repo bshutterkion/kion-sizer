@@ -64,7 +64,8 @@ esac
 FAKE
 chmod +x "$SHIMDIR/aws"
 
-run() { PATH="$SHIMDIR:$PATH" SCENARIO="$1" bash "$SCRIPT" "${@:2}" 2>/dev/null; }
+# Clear region envs so --region isn't appended (keeps expectations deterministic).
+run() { PATH="$SHIMDIR:$PATH" SCENARIO="$1" AWS_REGION= AWS_DEFAULT_REGION= bash "$SCRIPT" "${@:2}" 2>/dev/null; }
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -86,26 +87,26 @@ expect_fail() { # name scenario  — asserts nonzero exit and no stdout
 echo "cloudshell.sh discovery tests:"
 
 expect "legacy hourly parquet, peak month" legacy_hourly \
-  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly"
+  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --rds-from-aws"
 
 expect "prefers HOURLY+parquet among reports" multi_report \
-  "uv run kion-sizer --s3 s3://hourly-bkt/r/hourly/yearMonth=202606/ --granularity hourly"
+  "uv run kion-sizer --s3 s3://hourly-bkt/r/hourly/yearMonth=202606/ --granularity hourly --rds-from-aws"
 
 expect "CUR 2.0 data-exports fallback (BILLING_PERIOD)" data_exports \
-  "uv run kion-sizer --s3 s3://cur2-bkt/exports/cur2/data/BILLING_PERIOD=2026-06/"
+  "uv run kion-sizer --s3 s3://cur2-bkt/exports/cur2/data/BILLING_PERIOD=2026-06/ --rds-from-aws"
 
 expect "bucket-name heuristic fallback" bucketname \
-  "uv run kion-sizer --s3 s3://my-cur-bucket/cur/yearMonth=202606/"
+  "uv run kion-sizer --s3 s3://my-cur-bucket/cur/yearMonth=202606/ --rds-from-aws"
 
 expect "accounts + json passthrough" passthrough \
-  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --json" \
+  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --json --rds-from-aws" \
   --accounts 150 --json
 
 # --s3 override skips discovery entirely (no --granularity inferred).
-got="$(PATH="$SHIMDIR:$PATH" SCENARIO=none bash "$SCRIPT" --dry-run --s3 s3://manual/pfx/ 2>/dev/null)"
-[ "$got" = "uv run kion-sizer --s3 s3://manual/pfx/" ] \
+got="$(PATH="$SHIMDIR:$PATH" SCENARIO=none AWS_REGION= AWS_DEFAULT_REGION= bash "$SCRIPT" --dry-run --s3 s3://manual/pfx/ 2>/dev/null)"
+[ "$got" = "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" ] \
   && ok "--s3 override skips discovery" \
-  || bad "--s3 override skips discovery" "uv run kion-sizer --s3 s3://manual/pfx/" "$got"
+  || bad "--s3 override skips discovery" "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" "$got"
 
 expect_fail "no CUR anywhere -> error" none
 
