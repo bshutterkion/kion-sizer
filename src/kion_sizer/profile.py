@@ -87,6 +87,8 @@ def from_dir(
     if p.file_count == 0:
         raise ProfileError(f'no .parquet/.csv/.csv.gz files found under "{dir}"')
 
+    csv_recs = _dir_csv_recs(dir)
+    csv_accounts = None
     if read_footers and p.has_parquet and not p.has_csv:
         try:
             p.raw_line_items = read_footer_rows(dir)
@@ -94,7 +96,7 @@ def from_dir(
         except Exception as e:  # noqa: BLE001 — degrade to the bytes-only estimate
             _warn(f"parquet footer read failed ({e}); using bytes estimate")
     elif p.has_csv and not p.has_parquet:
-        est, sampled, total = sample_dir_raw_rows(dir, sample)
+        est, sampled, total, csv_accounts = scan_csv(csv_recs, sample, detect_accounts)
         p.raw_line_items, p.have_raw_rows = est, True
         p.sample_note = (
             f"ESTIMATED by sampling {sampled} of {total} files "
@@ -102,8 +104,8 @@ def from_dir(
         )
     if detect_accounts:
         try:
-            _detect_accounts(
-                p, sample, _dir_parquet_paths(dir), _dir_csv_recs(dir), None
+            _apply_accounts(
+                p, sample, _dir_parquet_paths(dir), csv_recs, csv_accounts, None
             )
         except Exception as e:  # noqa: BLE001 — account detection is best-effort
             _warn(f"account detection failed ({e}); skipping")
@@ -134,12 +136,6 @@ def count_data_rows(path: str) -> int:
         return count_rows_from_reader(f)
 
 
-@dataclass
-class _SampleItem:
-    size: int
-    count: Callable[[], int]
-
-
 def _stratified(items: list, n: int) -> list:
     """Pick up to n items spread evenly across an already size-sorted list.
 
@@ -155,54 +151,78 @@ def _stratified(items: list, n: int) -> list:
     return [items[i] for i in idxs]
 
 
-def extrapolate_raw_rows(groups: dict, max_sample: int) -> tuple[int, int, int]:
-    """Estimate total raw CSV line items across format groups.
+def _scan_one(rec: "_CsvRec", detect_accounts: bool) -> tuple[int, set | None]:
+    """Read one CSV file exactly once. Returns (data_row_count, account_ids).
 
-    Samples max_sample files per group — spread across the size distribution,
-    not just the largest — and extrapolates by that group's byte share, then sums
-    groups. Grouping keeps compressed vs uncompressed rows/byte from blending.
-    Returns (est, sampled, total).
+    account_ids is None when detection is off (the fast line-count path); when on,
+    a single csv parse yields both the row count and the account column values.
+    """
+    reader = rec.open_lines()
+    if not detect_accounts:
+        return count_rows_from_reader(reader), None
+    import csv
+
+    r = csv.reader(ln.decode("utf-8", "replace") for ln in reader)
+    try:
+        header = next(r)
+    except StopIteration:
+        return 0, set()
+    col = _pick_account_col(header)
+    idx = header.index(col) if col is not None else None
+    rows = 0
+    ids: set = set()
+    for row in r:
+        rows += 1
+        if idx is not None and idx < len(row):
+            ids.add(row[idx])
+    return rows, ids
+
+
+def scan_csv(
+    recs: list, max_sample: int, detect_accounts: bool = False
+) -> tuple[int, int, int, set | None]:
+    """Sample CSV files (stratified across each format's size distribution) in a
+    single read per file: estimate total raw rows by byte share and, when
+    detect_accounts is set, collect distinct account IDs from those same files (a
+    lower bound). Returns (est_rows, sampled, total, accounts_or_None).
     """
     if max_sample <= 0:
         max_sample = 3
-    total = sum(len(items) for items in groups.values())
+    total = len(recs)
     if total == 0:
         raise ProfileError("no csv/csv.gz files to sample")
-    plan = []  # (group_bytes, [selected items])
+    groups: dict[str, list] = {}
+    for r in recs:
+        groups.setdefault(r.ext, []).append(r)
+    plan = []  # (group_bytes, [selected recs])
     for items in groups.values():
         group_bytes = sum(it.size for it in items)
         if group_bytes == 0:
             continue
         ordered = sorted(items, key=lambda it: it.size, reverse=True)
         plan.append((group_bytes, _stratified(ordered, max_sample)))
-    selected = [it for _, sel in plan for it in sel]
-    counts = {}
-    for it in progress.track(selected, "sampling CUR rows", unit="file"):
-        counts[id(it)] = it.count()
+    selected = [r for _, sel in plan for r in sel]
+    rows_by = {}
+    accounts: set | None = set() if detect_accounts else None
+    for rec in progress.track(selected, "sampling CUR files", unit="file"):
+        rows, ids = _scan_one(rec, detect_accounts)
+        rows_by[id(rec)] = rows
+        if ids is not None:
+            accounts |= ids
     est = 0
     sampled = 0
     for group_bytes, sel in plan:
-        s_rows = sum(counts[id(it)] for it in sel)
-        s_bytes = sum(it.size for it in sel)
+        s_rows = sum(rows_by[id(r)] for r in sel)
+        s_bytes = sum(r.size for r in sel)
         sampled += len(sel)
         if s_bytes > 0:
             est += int(s_rows / s_bytes * group_bytes)
-    return est, sampled, total
+    return est, sampled, total, accounts
 
 
 def sample_dir_raw_rows(dir: str, max_sample: int) -> tuple[int, int, int]:
-    groups: dict[str, list[_SampleItem]] = {}
-    for root, _, files in os.walk(dir):
-        for name in files:
-            ext = data_ext(name)
-            if ext not in ("csv", "csv.gz"):
-                continue
-            path = os.path.join(root, name)
-            size = os.path.getsize(path)
-            groups.setdefault(ext, []).append(
-                _SampleItem(size=size, count=(lambda p=path: count_data_rows(p)))
-            )
-    return extrapolate_raw_rows(groups, max_sample)
+    est, sampled, total, _ = scan_csv(_dir_csv_recs(dir), max_sample)
+    return est, sampled, total
 
 
 # --- parquet footers (Task 6) ----------------------------------------------
@@ -307,27 +327,6 @@ class _CsvRec:
     open_lines: Callable[[], object]
 
 
-def _select_csv_recs(recs: list, sample: int) -> list:
-    groups: dict[str, list] = {}
-    for r in recs:
-        groups.setdefault(r.ext, []).append(r)
-    out = []
-    for items in groups.values():
-        out += _stratified(sorted(items, key=lambda r: r.size, reverse=True), sample)
-    return out
-
-
-def csv_account_ids(recs: list, sample: int) -> set:
-    """Distinct account IDs from the same stratified CSV sample used for rows —
-    a LOWER BOUND (accounts only in unsampled files are missed)."""
-    ids: set = set()
-    for rec in progress.track(
-        _select_csv_recs(recs, sample), "reading account ids", unit="file"
-    ):
-        ids |= _csv_account_ids(rec.open_lines())
-    return ids
-
-
 def _dir_csv_recs(dir: str) -> list:
     recs = []
     for root, _, files in os.walk(dir):
@@ -352,17 +351,30 @@ def _open_local_lines(path: str):
     return open(path, "rb")
 
 
-def _detect_accounts(
-    p: CURProfile, sample: int, parquet_paths: list, csv_recs: list, filesystem
+def _apply_accounts(
+    p: CURProfile,
+    sample: int,
+    parquet_paths: list,
+    csv_recs: list,
+    csv_accounts: set | None,
+    filesystem,
 ) -> None:
-    """Populate p.account_* from parquet (exact) and/or CSV (sampled) sources."""
+    """Populate p.account_* from parquet (exact) and/or CSV (sampled) sources.
+
+    csv_accounts, if provided, is the set already collected during the CSV row
+    scan — reused so a CSV CUR is read only once. It is None only when rows took a
+    non-CSV path (pure parquet, or a mixed CUR), in which case the CSV files are
+    scanned here.
+    """
     ids: set = set()
     parts = []
     if p.has_parquet and parquet_paths:
         ids |= parquet_account_ids(parquet_paths, filesystem=filesystem)
         parts.append("parquet (exact)")
     if p.has_csv and csv_recs:
-        ids |= csv_account_ids(csv_recs, sample)
+        if csv_accounts is None:
+            _, _, _, csv_accounts = scan_csv(csv_recs, sample, detect_accounts=True)
+        ids |= csv_accounts or set()
         parts.append("CSV sample")
     if not parts:
         return
@@ -432,25 +444,8 @@ def _resolve_region(client, bucket: str) -> str:
 
 
 def _sample_s3_raw_rows(client, bucket: str, objs: list, max_sample: int):
-    groups: dict[str, list[_SampleItem]] = {}
-    for o in objs:
-        ext = data_ext(base_name(o.key))
-        if ext not in ("csv", "csv.gz"):
-            continue
-        key = o.key
-        is_gz = key.lower().endswith(".gz")
-
-        def _count(k=key, gz=is_gz) -> int:
-            body = client.get_object(Bucket=bucket, Key=k)["Body"]
-            if gz:
-                with gzip.GzipFile(fileobj=io.BytesIO(body.read())) as g:
-                    return count_rows_from_reader(g)
-            # boto3's StreamingBody iterates by 1 KiB chunks, not lines, so feed
-            # iter_lines() to count_rows_from_reader (which counts one per item).
-            return count_rows_from_reader(body.iter_lines())
-
-        groups.setdefault(ext, []).append(_SampleItem(size=o.size, count=_count))
-    return extrapolate_raw_rows(groups, max_sample)
+    est, sampled, total, _ = scan_csv(_s3_csv_recs(client, bucket, objs), max_sample)
+    return est, sampled, total
 
 
 def _s3_csv_lines(client, bucket: str, key: str):
@@ -503,6 +498,8 @@ def from_s3(
     parquet_keys = [
         f"{bucket}/{o.key}" for o in objs if data_ext(base_name(o.key)) == "parquet"
     ]
+    csv_recs = _s3_csv_recs(client, bucket, objs)
+    csv_accounts = None
     if read_footers and p.has_parquet and not p.has_csv:
         try:
             p.raw_line_items = parquet_footer_rows(parquet_keys, _s3_filesystem(region))
@@ -510,7 +507,7 @@ def from_s3(
         except Exception as e:  # noqa: BLE001 — degrade to the bytes-only estimate
             _warn(f"S3 parquet footer read failed ({e}); using bytes estimate")
     elif p.has_csv and not p.has_parquet:
-        raw, sampled, total = _sample_s3_raw_rows(client, bucket, objs, sample)
+        raw, sampled, total, csv_accounts = scan_csv(csv_recs, sample, detect_accounts)
         p.raw_line_items, p.have_raw_rows = raw, True
         p.sample_note = (
             f"ESTIMATED by sampling {sampled} of {total} S3 files "
@@ -519,9 +516,7 @@ def from_s3(
     if detect_accounts:
         try:
             fs = _s3_filesystem(region) if p.has_parquet else None
-            _detect_accounts(
-                p, sample, parquet_keys, _s3_csv_recs(client, bucket, objs), fs
-            )
+            _apply_accounts(p, sample, parquet_keys, csv_recs, csv_accounts, fs)
         except Exception as e:  # noqa: BLE001 — account detection is best-effort
             _warn(f"account detection failed ({e}); skipping")
     return p

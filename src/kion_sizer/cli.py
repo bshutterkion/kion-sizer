@@ -7,6 +7,7 @@ testable; main() wires it to argv/stdout.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import config, model, pricing, profile, rds_catalog, render
@@ -108,14 +109,21 @@ def run(args: list[str], out) -> int:
     if accounts == 0 and p.have_accounts:
         accounts = p.account_count
 
+    # Both --rds-from-aws and --cost need a region. Fall back to the env, then to
+    # us-east-1 (the Pricing API's home + a safe default), so a session without an
+    # AWS_REGION set doesn't hard-fail the RDS lookup the way region=None does.
+    region = (
+        ns.region
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "us-east-1"
+    )
+
     tier_source = ""
     if ns.rds_from_aws:
-        region = ns.region or None
         try:
             cfg.rds_tiers = rds_catalog.orderable_tiers(region, ns.rds_engine)
-            tier_source = (
-                f"orderable in {ns.region or 'default region'} ({ns.rds_engine})"
-            )
+            tier_source = f"orderable in {region} ({ns.rds_engine})"
         except Exception as e:  # noqa: BLE001 — resilience: fall back on any AWS failure
             tier_source = f"built-in defaults (AWS lookup failed: {e})"
 
@@ -127,9 +135,7 @@ def run(args: list[str], out) -> int:
         # build_price_table; this try only guards truly unexpected errors so a
         # cost lookup can never fail the sizing run.
         try:
-            prices = pricing.build_price_table(
-                ns.region or None, rec.rds.name, ns.rds_engine
-            )
+            prices = pricing.build_price_table(region, rec.rds.name, ns.rds_engine)
             rec.cost = model.cost(rec, prices)
         except Exception as e:  # noqa: BLE001 — cost is best-effort
             print(f"warning: cost estimation skipped: {e}", file=out)

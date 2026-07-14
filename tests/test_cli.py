@@ -78,6 +78,30 @@ def test_run_no_cost_flag_no_cost_block(tmp_path):
     assert "Estimated monthly cost" not in out.getvalue()
 
 
+def test_rds_from_aws_defaults_region_when_unset(tmp_path, monkeypatch):
+    # With no --region and no AWS_REGION, the RDS lookup must get us-east-1, not
+    # None (which boto3 rejects with "You must specify a region").
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    seen = {}
+
+    def fake_orderable(region, engine):
+        seen["region"] = region
+        from kion_sizer import config
+
+        return config.default().rds_tiers
+
+    monkeypatch.setattr("kion_sizer.rds_catalog.orderable_tiers", fake_orderable)
+    f = tmp_path / "x.parquet"
+    with open(f, "wb") as fh:
+        fh.truncate(1 << 30)
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--rds-from-aws"], out)
+    assert code == 0, out.getvalue()
+    assert seen["region"] == "us-east-1"
+    assert "orderable in us-east-1" in out.getvalue()
+
+
 def test_run_requires_source():
     out = io.StringIO()
     code = cli.run([], out)

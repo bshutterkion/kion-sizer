@@ -77,6 +77,27 @@ def test_from_dir_detect_accounts_parquet_exact(tmp_path):
     assert p.account_source == "parquet (exact)"
 
 
+def test_scan_csv_reads_each_file_once_when_detecting():
+    # Rows AND accounts must come from a single read per file (no double I/O).
+    opens = {"a": 0, "b": 0}
+
+    def make(name, body):
+        def open_lines(n=name, b=body):
+            opens[n] += 1
+            return iter(b.split(b"\n"))
+
+        return profile._CsvRec(ext="csv", size=len(body), open_lines=open_lines)
+
+    recs = [
+        make("a", b"lineItem/UsageAccountId,c\n100,1\n200,2\n"),
+        make("b", b"lineItem/UsageAccountId,c\n300,3\n"),
+    ]
+    est, sampled, total, accounts = profile.scan_csv(recs, 10, detect_accounts=True)
+    assert accounts == {"100", "200", "300"}
+    assert sampled == 2 and total == 2
+    assert opens == {"a": 1, "b": 1}  # exactly one read each, not two
+
+
 def test_from_dir_detect_accounts_csv_lower_bound(tmp_path):
     (tmp_path / "a.csv").write_bytes(b"lineItem/UsageAccountId,c\n100,1\n200,2\n")
     with gzip.open(tmp_path / "b.csv.gz", "wb") as w:
