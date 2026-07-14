@@ -75,7 +75,79 @@ def render_text(r: Recommendation) -> str:
     else:
         b.append("  core/compliance/cost: pass --accounts N for service bands\n")
 
+    if r.cost is not None:
+        b.append(_render_cost(r.cost))
+
     return "".join(b)
+
+
+def _usd_mo(v) -> str:
+    return f"${v:,.0f}/mo" if v is not None else "n/a"
+
+
+def _render_cost(c) -> str:
+    b = ["\n"]
+    b.append(f"Estimated monthly cost ({c.source} · {c.hours_per_month} h/mo):\n\n")
+
+    b.append(f"  RDS  {c.rds_name:<20} {_usd_mo(c.rds_usd_mo):>12}")
+    b.append("   (instance compute only — storage & Multi-AZ not sized)\n\n")
+
+    b.append(
+        f"  financials-poller — as deployed on Fargate "
+        f"({c.poller_task_vcpu} vCPU / {c.poller_task_mem_gib:.0f} GiB):\n"
+    )
+    b.append(
+        f"    x86_64            {_usd_mo(c.poller_fargate_x86_usd_mo):>12}"
+        f"   (${c.poller_fargate_x86_hr:.3f}/hr)\n"
+    )
+    b.append(
+        f"    arm64 (Graviton)  {_usd_mo(c.poller_fargate_arm_usd_mo):>12}"
+        f"   (${c.poller_fargate_arm_hr:.3f}/hr)\n"
+    )
+
+    if c.ec2_exceeds:
+        b.append(
+            f"  financials-poller — EC2 alternative: no candidate holds "
+            f"{c.ec2_req_vcpu} vCPU / {c.ec2_req_mem_gib:.1f} GiB "
+            "(needs custom sizing)\n"
+        )
+    elif c.ec2_primary:
+        b.append(
+            f"  financials-poller — EC2 alternative (holds the "
+            f"{c.ec2_req_vcpu} vCPU / {c.ec2_req_mem_gib:.1f} GiB heap req):\n"
+        )
+        b.append(f"    {'instance':<15}{'vCPU':>5}{'mem':>9}  {'arch':<9}{'$/mo':>9}\n")
+        for o in c.ec2_primary:
+            b.append(_ec2_row(o))
+        if c.show_under:
+            b.append(
+                "    note: at this vCPU the memory-optimized (r) family can't hold "
+                "the requirement,\n"
+                "          so it jumps to the high-memory (x) family. "
+                "If less memory is enough:\n"
+            )
+            for o in c.ec2_under:
+                b.append(_ec2_row(o))
+
+    if c.services_usd_mo is not None:
+        b.append(
+            f"\n  service bands            {_usd_mo(c.services_usd_mo):>12}"
+            "   (core + compliance Fargate tasks, x86_64)\n"
+        )
+
+    b.append("  " + "-" * 46 + "\n")
+    b.append(f"  TOTAL ({c.total_note})   {_usd_mo(c.total_usd_mo)}\n")
+    b.append("  on-demand rates; RIs / Savings Plans / Spot can cut this ~30-55%.\n")
+    return "".join(b)
+
+
+def _ec2_row(o) -> str:
+    star = "  <- cheapest fit" if o.cheapest else ""
+    price = f"${o.usd_mo:,.0f}" if o.usd_mo is not None else "n/a"
+    return (
+        f"    {o.name:<15}{o.vcpu:>5}{o.mem_gib:>6.0f} GiB  "
+        f"{o.arch:<9}{price:>9}{star}\n"
+    )
 
 
 def render_json(r: Recommendation) -> str:
@@ -109,7 +181,46 @@ def render_json(r: Recommendation) -> str:
             "compliance_cpu": s.compliance_cpu,
             "compliance_mem_mib": s.compliance_mem_mib,
         }
+    if r.cost is not None:
+        out["cost"] = _cost_json(r.cost)
     # Go json.MarshalIndent re-sorts ALL map keys; re-sort the top level by key
-    # while leaving the (dict) services value in field order.
+    # while leaving the (dict) services/cost values in field order.
     ordered = {k: out[k] for k in sorted(out.keys())}
     return json.dumps(ordered, indent=2)
+
+
+def _cost_json(c) -> dict:
+    def opts(rows):
+        return [
+            {
+                "instance": o.name,
+                "vcpu": o.vcpu,
+                "mem_gib": _go_float(o.mem_gib),
+                "arch": o.arch,
+                "usd_mo": o.usd_mo,
+                "cheapest": o.cheapest,
+            }
+            for o in rows
+        ]
+
+    return {
+        "source": c.source,
+        "region": c.region_label,
+        "hours_per_month": c.hours_per_month,
+        "rds_instance": c.rds_name,
+        "rds_usd_mo": c.rds_usd_mo,
+        "poller_fargate": {
+            "vcpu": c.poller_task_vcpu,
+            "mem_gib": _go_float(c.poller_task_mem_gib),
+            "x86_64_usd_mo": c.poller_fargate_x86_usd_mo,
+            "arm64_usd_mo": c.poller_fargate_arm_usd_mo,
+        },
+        "poller_ec2_req_vcpu": c.ec2_req_vcpu,
+        "poller_ec2_req_mem_gib": _go_float(c.ec2_req_mem_gib),
+        "poller_ec2_exceeds": c.ec2_exceeds,
+        "poller_ec2_primary": opts(c.ec2_primary),
+        "poller_ec2_under": opts(c.ec2_under) if c.show_under else [],
+        "services_usd_mo": c.services_usd_mo,
+        "total_usd_mo": c.total_usd_mo,
+        "total_note": c.total_note,
+    }

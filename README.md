@@ -65,7 +65,9 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
 | `--read-footers` | Exact parquet row counts from footers (local `--dir` only). |
 | `--json` | Machine-readable output. |
 | `--rds-from-aws` | Size the RDS tier against the DB instance classes actually **orderable** in `--region` (via `describe-orderable-db-instance-options` + `describe-instance-types`); falls back to the built-in tiers if AWS is unreachable. `cloudshell.sh` enables this by default. |
-| `--region R` | Region for `--rds-from-aws` (defaults to the AWS session region). |
+| `--cost` | Estimate **monthly cost** (RDS + poller Fargate + service bands, with a total) and the **EC2-equivalent** instances that hold the poller's CPU/memory. Live AWS Pricing API (needs `pricing:GetProducts`), falling back to an embedded us-east-1 snapshot. `cloudshell.sh` enables this by default. |
+| `--region R` | Region for `--rds-from-aws` and `--cost` pricing (defaults to the AWS session region). |
+| `--rds-engine E` | RDS engine for orderability + pricing (default `mysql`). |
 | `--config FILE` | Override the calibration constants (`default.yaml`). |
 
 ## What it reports
@@ -78,6 +80,14 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
   discrete CPU/memory combinations).
 - **core / compliance service bands** — starting ECS task counts + CPU/memory by
   account count (with `--accounts`).
+- **estimated monthly cost** (with `--cost`) — RDS + poller Fargate (x86_64 and
+  arm64) + service bands, with a stack total; plus an **EC2-equivalent menu** for
+  the poller: the smallest instance per family/architecture that holds the poller's
+  heap requirement, cheapest marked. When a memory requirement lands in a dead zone
+  between instance tiers, it also shows the closest smaller-memory options. Prices
+  are on-demand (RIs / Savings Plans / Spot can cut ~30-55%); RDS is compute-only
+  (storage and Multi-AZ are not sized). Refresh the embedded snapshot with the
+  values in `src/kion_sizer/prices.json` (pulled from the AWS Pricing API).
 
 Parquet (CUR 2.0) and legacy CSV (`.csv` / `.csv.gz`) are both supported; legacy
 CSV row counts are estimated by sampling the largest files and extrapolating by

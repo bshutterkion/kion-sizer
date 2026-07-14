@@ -90,41 +90,41 @@ expect_fail() { # name scenario  — asserts nonzero exit and no stdout
 echo "cloudshell.sh discovery tests:"
 
 expect "legacy hourly parquet, peak month" legacy_hourly \
-  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --rds-from-aws"
+  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --rds-from-aws --cost"
 
 expect "prefers HOURLY+parquet among reports" multi_report \
-  "uv run kion-sizer --s3 s3://hourly-bkt/r/hourly/yearMonth=202606/ --granularity hourly --rds-from-aws"
+  "uv run kion-sizer --s3 s3://hourly-bkt/r/hourly/yearMonth=202606/ --granularity hourly --rds-from-aws --cost"
 
 expect "CUR 2.0 data-exports fallback (BILLING_PERIOD)" data_exports \
-  "uv run kion-sizer --s3 s3://cur2-bkt/exports/cur2/data/BILLING_PERIOD=2026-06/ --rds-from-aws"
+  "uv run kion-sizer --s3 s3://cur2-bkt/exports/cur2/data/BILLING_PERIOD=2026-06/ --rds-from-aws --cost"
 
 expect "bucket-name heuristic fallback" bucketname \
-  "uv run kion-sizer --s3 s3://my-cur-bucket/cur/yearMonth=202606/ --rds-from-aws"
+  "uv run kion-sizer --s3 s3://my-cur-bucket/cur/yearMonth=202606/ --rds-from-aws --cost"
 
 # --bucket picks the peak month in a named bucket, skipping the discovery tiers.
 expect "--bucket picks peak month in named bucket" named_bucket \
-  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws" \
+  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws --cost" \
   --bucket named-bkt
 
 # A pasted s3:// scheme and trailing slash on --bucket resolve identically.
 expect "--bucket tolerates s3:// scheme and trailing slash" named_bucket \
-  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws" \
+  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws --cost" \
   --bucket s3://named-bkt/
 
 # --s3 wins when both --s3 and --bucket are given.
 expect "--s3 takes precedence over --bucket" named_bucket \
-  "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" \
+  "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws --cost" \
   --s3 s3://manual/pfx/ --bucket named-bkt
 
 expect "accounts + json passthrough" passthrough \
-  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --json --rds-from-aws" \
+  "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --json --rds-from-aws --cost" \
   --accounts 150 --json
 
 # --s3 override skips discovery entirely (no --granularity inferred).
 got="$(PATH="$SHIMDIR:$PATH" SCENARIO=none AWS_REGION= AWS_DEFAULT_REGION= bash "$SCRIPT" --dry-run --s3 s3://manual/pfx/ 2>/dev/null)"
-[ "$got" = "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" ] \
+[ "$got" = "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws --cost" ] \
   && ok "--s3 override skips discovery" \
-  || bad "--s3 override skips discovery" "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" "$got"
+  || bad "--s3 override skips discovery" "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws --cost" "$got"
 
 expect_fail "no CUR anywhere -> error" none
 

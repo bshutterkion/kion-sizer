@@ -24,6 +24,7 @@ packages = ["src/kion_sizer"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/kion_sizer/default.yaml" = "kion_sizer/default.yaml"
+"src/kion_sizer/prices.json" = "kion_sizer/prices.json"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

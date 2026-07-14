@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, model, profile, rds_catalog, render
+from . import config, model, pricing, profile, rds_catalog, render
 
 
 class _UsageError(Exception):
@@ -50,6 +50,13 @@ def run(args: list[str], out) -> int:
     )
     parser.add_argument("--region", default="")
     parser.add_argument("--rds-engine", dest="rds_engine", default="mysql")
+    parser.add_argument(
+        "--cost",
+        dest="cost",
+        action="store_true",
+        help="estimate monthly cost + EC2-equivalent for the poller (live AWS "
+        "Pricing API, falls back to an embedded snapshot)",
+    )
     try:
         ns = parser.parse_args(args)
     except _UsageError:
@@ -84,6 +91,19 @@ def run(args: list[str], out) -> int:
 
     rec = model.recommend(p, cfg, ns.accounts)
     rec.rds_tier_source = tier_source
+
+    if ns.cost:
+        # Any pricing failure degrades to the embedded snapshot inside
+        # build_price_table; this try only guards truly unexpected errors so a
+        # cost lookup can never fail the sizing run.
+        try:
+            prices = pricing.build_price_table(
+                ns.region or None, rec.rds.name, ns.rds_engine
+            )
+            rec.cost = model.cost(rec, prices)
+        except Exception as e:  # noqa: BLE001 — cost is best-effort
+            print(f"warning: cost estimation skipped: {e}", file=out)
+
     if ns.as_json:
         print(render.render_json(rec), file=out)
     else:
