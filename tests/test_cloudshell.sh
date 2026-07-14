@@ -44,6 +44,9 @@ case "$svc/$sub" in
         bucketname)
           echo "2026-06-01 00:00:00    100 cur/yearMonth=202605/f.parquet"
           echo "2026-07-01 00:00:00    800 cur/yearMonth=202606/f.parquet" ;;
+        named_bucket)
+          echo "2026-06-01 00:00:00    100 reports/parquet/yearMonth=202605/f.parquet"
+          echo "2026-07-01 00:00:00    700 reports/parquet/yearMonth=202606/f.parquet" ;;
         multi_report)
           echo "2026-06-01 00:00:00    100 r/hourly/yearMonth=202605/f.parquet"
           echo "2026-07-01 00:00:00    999 r/hourly/yearMonth=202606/f.parquet" ;;
@@ -97,6 +100,21 @@ expect "CUR 2.0 data-exports fallback (BILLING_PERIOD)" data_exports \
 
 expect "bucket-name heuristic fallback" bucketname \
   "uv run kion-sizer --s3 s3://my-cur-bucket/cur/yearMonth=202606/ --rds-from-aws"
+
+# --bucket picks the peak month in a named bucket, skipping the discovery tiers.
+expect "--bucket picks peak month in named bucket" named_bucket \
+  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws" \
+  --bucket named-bkt
+
+# A pasted s3:// scheme and trailing slash on --bucket resolve identically.
+expect "--bucket tolerates s3:// scheme and trailing slash" named_bucket \
+  "uv run kion-sizer --s3 s3://named-bkt/reports/parquet/yearMonth=202606/ --rds-from-aws" \
+  --bucket s3://named-bkt/
+
+# --s3 wins when both --s3 and --bucket are given.
+expect "--s3 takes precedence over --bucket" named_bucket \
+  "uv run kion-sizer --s3 s3://manual/pfx/ --rds-from-aws" \
+  --s3 s3://manual/pfx/ --bucket named-bkt
 
 expect "accounts + json passthrough" passthrough \
   "uv run kion-sizer --s3 s3://cur-bucket/reports/hourly-cur/yearMonth=202606/ --granularity hourly --accounts 150 --json --rds-from-aws" \

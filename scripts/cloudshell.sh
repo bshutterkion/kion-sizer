@@ -19,7 +19,13 @@
 #   bash scripts/cloudshell.sh --accounts 150   # add per-service starting bands
 #   bash scripts/cloudshell.sh --json           # machine-readable output
 #   bash scripts/cloudshell.sh --s3 s3://b/pfx/ # skip discovery, size this prefix
+#   bash scripts/cloudshell.sh --bucket NAME    # pick the peak month in a named bucket
 #   bash scripts/cloudshell.sh --dry-run        # print the resolved command, don't run
+#
+# Use --bucket when this account has more than one CUR bucket and the automatic
+# discovery lands on the wrong one: it runs the same peak-by-bytes month picker
+# discovery uses, but only against the bucket you name. --s3 takes precedence
+# over --bucket when both are given.
 #
 # Requires (all preinstalled in CloudShell): aws, python3, curl, git.
 
@@ -189,7 +195,7 @@ bootstrap_uv() {
 
 # --- main -------------------------------------------------------------------
 main() {
-  local ACCOUNTS="" AS_JSON=0 S3_OVERRIDE="" DRY_RUN=0
+  local ACCOUNTS="" AS_JSON=0 S3_OVERRIDE="" BUCKET_OVERRIDE="" DRY_RUN=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --accounts)   ACCOUNTS="${2:-}"; shift 2 ;;
@@ -197,6 +203,8 @@ main() {
       --json)       AS_JSON=1; shift ;;
       --s3)         S3_OVERRIDE="${2:-}"; shift 2 ;;
       --s3=*)       S3_OVERRIDE="${1#*=}"; shift ;;
+      --bucket)     BUCKET_OVERRIDE="${2:-}"; shift 2 ;;
+      --bucket=*)   BUCKET_OVERRIDE="${1#*=}"; shift ;;
       --dry-run)    DRY_RUN=1; shift ;;
       -h|--help)    grep '^#' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
       *) echo "unknown arg: $1" >&2; return 2 ;;
@@ -206,6 +214,15 @@ main() {
   local GRAN="" S3_URI="" out
   if [ -n "$S3_OVERRIDE" ]; then
     S3_URI="$S3_OVERRIDE"
+  elif [ -n "$BUCKET_OVERRIDE" ]; then
+    # Skip discovery; run the peak-by-bytes month picker against only this
+    # bucket. Tolerate a pasted s3:// scheme and/or trailing slash.
+    local bkt="$BUCKET_OVERRIDE"
+    bkt="${bkt#s3://}"; bkt="${bkt%/}"
+    out="$(_peak_month_uri "$bkt" "")" || die "no parquet/csv CUR data found in bucket '$bkt'. Pass --s3 s3://$bkt/prefix/ to size a specific prefix."
+    eval "$out"   # sets S3_URI (GRAN stays unknown — not declared by the bucket)
+    [ -n "$S3_URI" ] || die "no peak month resolved in bucket '$bkt'"
+    log "# peak-month CUR in $bkt: $S3_URI  (granularity: unknown)"
   else
     out="$(discover_cur)" || die "no CUR found in this account (no report definition, no data export, no matching bucket). Pass --s3 s3://bucket/prefix/ to size a specific location."
     eval "$out"   # sets GRAN and S3_URI

@@ -36,8 +36,13 @@ That's it — no `--profile`, no account flag, no S3 URI. The script:
 bash scripts/cloudshell.sh --accounts 150      # add per-service starting bands
 bash scripts/cloudshell.sh --json              # machine-readable output
 bash scripts/cloudshell.sh --s3 s3://b/prefix/ # skip discovery; size this prefix
+bash scripts/cloudshell.sh --bucket NAME       # pick the peak month in a named bucket
 bash scripts/cloudshell.sh --dry-run           # print the resolved command only
 ```
+
+Use `--bucket` when the account has more than one CUR bucket and auto-discovery
+picks the wrong one — it runs the same peak-by-bytes month picker, scoped to the
+bucket you name. `--s3` takes precedence over `--bucket` when both are given.
 
 Uses the CloudShell session's ambient credentials. The CUR's S3 bucket region is
 auto-resolved (customer buckets are not always `us-east-1`).
