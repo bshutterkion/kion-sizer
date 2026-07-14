@@ -40,7 +40,25 @@ def run(args: list[str], out) -> int:
     parser.add_argument("--config", dest="config", default="")
     parser.add_argument("--accounts", type=int, default=0)
     parser.add_argument("--granularity", default="unknown")
-    parser.add_argument("--read-footers", dest="read_footers", action="store_true")
+    parser.add_argument(
+        "--read-footers",
+        dest="read_footers",
+        action="store_true",
+        help="exact raw line-item counts from parquet footers (local --dir or --s3)",
+    )
+    parser.add_argument(
+        "--sample",
+        type=int,
+        default=20,
+        help="CSV files to sample per format for row estimation (default 20)",
+    )
+    parser.add_argument(
+        "--detect-accounts",
+        dest="detect_accounts",
+        action="store_true",
+        help="auto-detect the member-account count from the CUR "
+        "(exact for parquet; a lower bound from the CSV sample)",
+    )
     parser.add_argument("--json", dest="as_json", action="store_true")
     parser.add_argument(
         "--rds-from-aws",
@@ -73,10 +91,22 @@ def run(args: list[str], out) -> int:
         return 1
 
     try:
-        p = _build_profile(ns.dir, ns.s3, ns.granularity, ns.read_footers)
+        p = _build_profile(
+            ns.dir,
+            ns.s3,
+            ns.granularity,
+            ns.sample,
+            ns.read_footers,
+            ns.detect_accounts,
+        )
     except (profile.ProfileError, OSError) as e:
         print(f"error: {e}", file=out)
         return 1
+
+    # An explicit --accounts always wins; otherwise use the auto-detected count.
+    accounts = ns.accounts
+    if accounts == 0 and p.have_accounts:
+        accounts = p.account_count
 
     tier_source = ""
     if ns.rds_from_aws:
@@ -89,7 +119,7 @@ def run(args: list[str], out) -> int:
         except Exception as e:  # noqa: BLE001 — resilience: fall back on any AWS failure
             tier_source = f"built-in defaults (AWS lookup failed: {e})"
 
-    rec = model.recommend(p, cfg, ns.accounts)
+    rec = model.recommend(p, cfg, accounts)
     rec.rds_tier_source = tier_source
 
     if ns.cost:
@@ -111,22 +141,29 @@ def run(args: list[str], out) -> int:
     return 0
 
 
-def _build_profile(dir: str, s3uri: str, gran: str, read_footers: bool):
+def _build_profile(
+    dir: str,
+    s3uri: str,
+    gran: str,
+    sample: int,
+    read_footers: bool,
+    detect_accounts: bool,
+):
+    # from_dir/from_s3 own the footer/sampling/account passes (that's where the
+    # I/O and progress bars live); this only picks the source and sets granularity.
     if dir != "":
-        p = profile.from_dir(dir)
+        p = profile.from_dir(
+            dir,
+            sample=sample,
+            read_footers=read_footers,
+            detect_accounts=detect_accounts,
+        )
     else:
-        p = profile.from_s3(s3uri)
-
-    if read_footers and dir != "":
-        p.raw_line_items = profile.read_footer_rows(dir)
-        p.have_raw_rows = True
-
-    if p.has_csv and not p.has_parquet and dir != "":
-        est, sampled, total = profile.sample_dir_raw_rows(dir, 3)
-        p.raw_line_items, p.have_raw_rows = est, True
-        p.sample_note = (
-            f"ESTIMATED by sampling {sampled} of {total} files "
-            "(extrapolated by byte share)"
+        p = profile.from_s3(
+            s3uri,
+            sample=sample,
+            read_footers=read_footers,
+            detect_accounts=detect_accounts,
         )
 
     if gran in ("daily", "hourly"):

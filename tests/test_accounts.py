@@ -1,0 +1,104 @@
+"""Account auto-detection + parquet footer/column reads over a filesystem.
+
+The S3 paths funnel through pyarrow's filesystem abstraction, so a LocalFileSystem
+exercises the same reader code the S3FileSystem would — no real AWS needed.
+"""
+
+import gzip
+
+import pyarrow as pa
+import pyarrow.fs as pafs
+import pyarrow.parquet as pq
+
+from kion_sizer import profile
+
+
+def _write_parquet(path, accounts, n_extra=0):
+    cols = {"line_item_usage_account_id": accounts, "x": list(range(len(accounts)))}
+    pq.write_table(pa.table(cols), path)
+
+
+# --- column picking ---------------------------------------------------------
+def test_pick_account_col_snake_and_camel():
+    assert profile._pick_account_col(["a", "line_item_usage_account_id"]) == (
+        "line_item_usage_account_id"
+    )
+    assert profile._pick_account_col(["lineItem/UsageAccountId", "b"]) == (
+        "lineItem/UsageAccountId"
+    )
+    # normalized fallback for odd casing/separators
+    assert profile._pick_account_col(["LineItem_UsageAccountID"]) == (
+        "LineItem_UsageAccountID"
+    )
+    assert profile._pick_account_col(["unrelated"]) is None
+
+
+# --- parquet footer + column reads via a filesystem -------------------------
+def test_parquet_footer_rows_via_filesystem(tmp_path):
+    _write_parquet(str(tmp_path / "a.parquet"), ["1", "1", "2"])
+    _write_parquet(str(tmp_path / "b.parquet"), ["3", "4"])
+    fs = pafs.LocalFileSystem()
+    paths = [str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")]
+    assert profile.parquet_footer_rows(paths, filesystem=fs) == 5
+
+
+def test_parquet_account_ids_exact(tmp_path):
+    _write_parquet(str(tmp_path / "a.parquet"), ["100", "100", "200"])
+    _write_parquet(str(tmp_path / "b.parquet"), ["200", "300"])
+    fs = pafs.LocalFileSystem()
+    paths = [str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")]
+    assert profile.parquet_account_ids(paths, filesystem=fs) == {"100", "200", "300"}
+
+
+def test_parquet_account_ids_missing_column(tmp_path):
+    pq.write_table(pa.table({"other": [1, 2]}), str(tmp_path / "a.parquet"))
+    assert profile.parquet_account_ids([str(tmp_path / "a.parquet")]) == set()
+
+
+# --- CSV account reads ------------------------------------------------------
+def test_csv_account_ids_reader():
+    data = b"lineItem/UsageAccountId,cost\n100,1\n100,2\n200,3\n"
+    assert profile._csv_account_ids(iter(data.split(b"\n"))) == {"100", "200"}
+
+
+def test_csv_account_ids_no_column():
+    data = b"foo,bar\n1,2\n"
+    assert profile._csv_account_ids(iter(data.split(b"\n"))) == set()
+
+
+# --- from_dir integration ---------------------------------------------------
+def test_from_dir_detect_accounts_parquet_exact(tmp_path):
+    _write_parquet(str(tmp_path / "a.parquet"), ["100", "100", "200"])
+    _write_parquet(str(tmp_path / "b.parquet"), ["300"])
+    p = profile.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
+    assert p.raw_line_items == 4  # exact footer rows
+    assert p.account_count == 3  # {100,200,300}
+    assert p.account_lower_bound is False
+    assert p.account_source == "parquet (exact)"
+
+
+def test_from_dir_detect_accounts_csv_lower_bound(tmp_path):
+    (tmp_path / "a.csv").write_bytes(b"lineItem/UsageAccountId,c\n100,1\n200,2\n")
+    with gzip.open(tmp_path / "b.csv.gz", "wb") as w:
+        w.write(b"lineItem/UsageAccountId,c\n300,9\n")
+    p = profile.from_dir(str(tmp_path), detect_accounts=True)
+    assert p.account_count == 3
+    assert p.account_lower_bound is True
+    assert p.account_source == "CSV sample"
+
+
+def test_detect_accounts_off_by_default(tmp_path):
+    _write_parquet(str(tmp_path / "a.parquet"), ["100"])
+    p = profile.from_dir(str(tmp_path))
+    assert p.have_accounts is False
+    assert p.account_count == 0
+
+
+def test_corrupt_parquet_degrades_without_crashing(tmp_path, capsys):
+    # A non-parquet file with a .parquet name must not blow up the run: footers
+    # fall back to the bytes estimate and account detection is skipped.
+    (tmp_path / "bad.parquet").write_bytes(b"not a parquet file")
+    p = profile.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
+    assert p.have_raw_rows is False  # degraded to bytes path
+    assert p.have_accounts is False  # detection skipped
+    assert "failed" in capsys.readouterr().err  # warned on stderr

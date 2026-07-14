@@ -44,11 +44,13 @@ Use `--bucket` when the account has more than one CUR bucket and auto-discovery
 picks the wrong one — it runs the same peak-by-bytes month picker, scoped to the
 bucket you name. `--s3` takes precedence over `--bucket` when both are given.
 
-`cloudshell.sh` runs `--rds-from-aws` and `--cost` **by default**, so every run
-already includes the region-orderable RDS tier, the monthly cost estimate, and the
-EC2-equivalent for the poller — no extra flags needed. (Each degrades gracefully if
-the underlying AWS call is unavailable.) `--accounts N` adds the service-band cost
-line; `--json` emits the whole thing, cost included, as JSON.
+`cloudshell.sh` runs `--rds-from-aws`, `--cost`, `--read-footers`, and
+`--detect-accounts` **by default**, so every run already includes the
+region-orderable RDS tier, the monthly cost estimate + EC2-equivalent, exact
+parquet row counts, and the auto-detected account count — no extra flags needed.
+(Each degrades gracefully if the underlying AWS/parquet call is unavailable.) The
+slower AWS/parquet passes stream a progress bar to stderr, so a large CUR shows
+live progress. `--json` emits the whole thing, cost included, as JSON.
 
 Uses the CloudShell session's ambient credentials. The CUR's S3 bucket region is
 auto-resolved (customer buckets are not always `us-east-1`).
@@ -66,9 +68,11 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
 |------|---------|
 | `--s3 s3://…/` | Size a CUR month in S3 (auto-resolves bucket region). |
 | `--dir PATH` | Size a locally-downloaded CUR month. |
-| `--accounts N` | Add core/compliance service starting bands for N AWS accounts. |
+| `--accounts N` | Core/compliance service bands for N AWS accounts. Overrides `--detect-accounts`. |
+| `--detect-accounts` | Auto-detect the member-account count from the CUR's `line_item_usage_account_id` column — **exact** for parquet, a labeled **lower bound** from the CSV sample. Feeds the service bands when `--accounts` isn't given. `cloudshell.sh` enables this by default. |
 | `--granularity hourly\|daily` | CUR granularity (hourly ≈ 24× the rows of daily). |
-| `--read-footers` | Exact parquet row counts from footers (local `--dir` only). |
+| `--read-footers` | Exact raw line-item counts from parquet footers — now works on **`--s3`** as well as `--dir` (footer bytes only, never row data). `cloudshell.sh` enables this by default. |
+| `--sample N` | CSV files to sample per format for row estimation (default 20, spread across the size distribution). |
 | `--json` | Machine-readable output. |
 | `--rds-from-aws` | Size the RDS tier against the DB instance classes actually **orderable** in `--region` (via `describe-orderable-db-instance-options` + `describe-instance-types`); falls back to the built-in tiers if AWS is unreachable. `cloudshell.sh` enables this by default. |
 | `--cost` | Estimate **monthly cost** (RDS + poller Fargate + service bands, with a total) and the **EC2-equivalent** instances that hold the poller's CPU/memory. Live AWS Pricing API (needs `pricing:GetProducts`), falling back to an embedded us-east-1 snapshot. `cloudshell.sh` enables this by default. |
@@ -95,9 +99,13 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
   (storage and Multi-AZ are not sized). Refresh the embedded snapshot with the
   values in `src/kion_sizer/prices.json` (pulled from the AWS Pricing API).
 
-Parquet (CUR 2.0) and legacy CSV (`.csv` / `.csv.gz`) are both supported; legacy
-CSV row counts are estimated by sampling the largest files and extrapolating by
-byte share.
+- **member accounts** (with `--detect-accounts`) — distinct
+  `line_item_usage_account_id`s in the CUR, used to pick the service bands.
+
+Parquet (CUR 2.0) and legacy CSV (`.csv` / `.csv.gz`) are both supported. Parquet
+row counts are exact from footers (`--read-footers`); legacy CSV row counts are
+estimated by sampling files spread across the size distribution (`--sample N`) and
+extrapolating by byte share.
 
 ## Development
 

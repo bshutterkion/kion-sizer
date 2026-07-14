@@ -19,6 +19,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from . import progress
+
 # The Pricing API is only served from a few endpoints; us-east-1 always works.
 # The deployment region is selected with the regionCode *filter*, not the client.
 _PRICING_ENDPOINT_REGION = "us-east-1"
@@ -213,7 +215,13 @@ def _fetch_ec2_prices(
 
     prices = dict(fallback)
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for name, usd in zip(names, pool.map(one, names)):
+        results = progress.track(
+            pool.map(one, names),
+            "pricing EC2 candidates",
+            total=len(names),
+            unit="type",
+        )
+        for name, usd in zip(names, results):
             if usd:
                 prices[name] = usd
     return prices

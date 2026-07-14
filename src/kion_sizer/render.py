@@ -36,6 +36,12 @@ def render_text(r: Recommendation) -> str:
         b.append(f"  CUR line items:   {r.raw_line_items} (raw, {src})\n")
     b.append(f"  aggregated PUC rows: {r.est_rows} (est. from {r.est_basis})\n")
     b.append(f"  peak shard:       {r.shard_gib:.1f} GiB\n")
+    if getattr(r.profile, "have_accounts", False):
+        lb = "+ (lower bound)" if r.profile.account_lower_bound else ""
+        b.append(
+            f"  member accounts:  {r.profile.account_count}{lb} "
+            f"(auto-detected from {r.profile.account_source})\n"
+        )
     if r.raw_line_items > 0:
         b.append(
             "  NOTE: aggregated rows derived via a customer-variable raw→aggregated "

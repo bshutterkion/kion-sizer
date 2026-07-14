@@ -33,6 +33,41 @@ def test_run_cost_flag_appends_cost_block(tmp_path, monkeypatch):
     assert "EC2 alternative" in out.getvalue()
 
 
+def test_run_detect_accounts_drives_service_bands(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    accts = [str(100 + i) for i in range(120)]  # 120 distinct member accounts
+    pq.write_table(
+        pa.table({"line_item_usage_account_id": accts, "x": list(range(len(accts)))}),
+        str(tmp_path / "a.parquet"),
+    )
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--detect-accounts"], out)
+    assert code == 0, out.getvalue()
+    text = out.getvalue()
+    assert "member accounts:  120" in text
+    # 120 accounts auto-fed the service bands (no --accounts passed)
+    assert "core services:" in text
+
+
+def test_run_explicit_accounts_overrides_detection(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(
+        pa.table({"line_item_usage_account_id": ["1", "2", "3"]}),
+        str(tmp_path / "a.parquet"),
+    )
+    out = io.StringIO()
+    code = cli.run(
+        ["--dir", str(tmp_path), "--detect-accounts", "--accounts", "500"], out
+    )
+    assert code == 0, out.getvalue()
+    # detection still reported, but --accounts 500 drives the bands
+    assert "member accounts:  3" in out.getvalue()
+
+
 def test_run_no_cost_flag_no_cost_block(tmp_path):
     f = tmp_path / "x.parquet"
     with open(f, "wb") as fh:

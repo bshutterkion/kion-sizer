@@ -237,11 +237,13 @@ main() {
   case "$GRAN" in hourly|daily) ARGS+=(--granularity "$GRAN") ;; esac
   [ -n "$ACCOUNTS" ] && ARGS+=(--accounts "$ACCOUNTS")
   [ "$AS_JSON" = 1 ] && ARGS+=(--json)
-  # CloudShell has creds — size the RDS tier against the classes actually
-  # orderable in this region (falls back to built-in tiers if the lookup fails)
-  # and estimate monthly cost + EC2-equivalent from the live Pricing API
-  # (falls back to an embedded us-east-1 snapshot if pricing is unavailable).
-  ARGS+=(--rds-from-aws --cost)
+  # CloudShell has creds, so lean on AWS for accuracy (each degrades gracefully):
+  #   --rds-from-aws     size RDS from classes orderable in-region
+  #   --cost             monthly cost + EC2-equivalent from the live Pricing API
+  #   --read-footers     exact parquet row counts (footers), not a bytes estimate
+  #   --detect-accounts  member-account count straight from the CUR
+  # Progress bars stream to stderr for the slower AWS/parquet passes.
+  ARGS+=(--rds-from-aws --cost --read-footers --detect-accounts)
   local region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
   [ -n "$region" ] && ARGS+=(--region "$region")
 
