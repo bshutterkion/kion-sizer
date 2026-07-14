@@ -44,6 +44,12 @@ Use `--bucket` when the account has more than one CUR bucket and auto-discovery
 picks the wrong one — it runs the same peak-by-bytes month picker, scoped to the
 bucket you name. `--s3` takes precedence over `--bucket` when both are given.
 
+`cloudshell.sh` runs `--rds-from-aws` and `--cost` **by default**, so every run
+already includes the region-orderable RDS tier, the monthly cost estimate, and the
+EC2-equivalent for the poller — no extra flags needed. (Each degrades gracefully if
+the underlying AWS call is unavailable.) `--accounts N` adds the service-band cost
+line; `--json` emits the whole thing, cost included, as JSON.
+
 Uses the CloudShell session's ambient credentials. The CUR's S3 bucket region is
 auto-resolved (customer buckets are not always `us-east-1`).
 

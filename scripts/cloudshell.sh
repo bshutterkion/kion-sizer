@@ -12,7 +12,10 @@
 #      3.12 + the tool's deps in your home dir; nothing needs sudo).
 #   2. Discover the CUR — legacy CUR (describe-report-definitions), then CUR 2.0 /
 #      BCM Data Exports, then a bucket-name heuristic. Picks the peak month by bytes.
-#   3. Size it — runs `kion-sizer --s3 <discovered> --granularity <hourly|daily>`.
+#   3. Size it — runs `kion-sizer --s3 <discovered> --granularity <hourly|daily>`,
+#      with `--rds-from-aws` and `--cost` on by default (RDS tier sized from what's
+#      orderable in-region; monthly cost + EC2-equivalent from the live Pricing API,
+#      each falling back gracefully if the AWS call is denied or slow).
 #
 # Usage:
 #   bash scripts/cloudshell.sh                  # discover + size (human-readable)
