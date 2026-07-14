@@ -69,6 +69,9 @@ def test_cost_block_renders_text():
     assert "EC2 alternative" in out
     assert "TOTAL (" in out
     assert "/mo" in out
+    # the EC2 box is the poller only — must say the other services aren't covered
+    assert "replaces the financials-poller only" in out
+    assert "microservices run separately" in out
 
 
 def test_cost_present_in_json():

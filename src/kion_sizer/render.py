@@ -128,6 +128,11 @@ def _render_cost(c) -> str:
             )
             for o in c.ec2_under:
                 b.append(_ec2_row(o))
+        b.append(
+            "    NOTE: this instance replaces the financials-poller only — RDS and\n"
+            "          the core/compliance/cost microservices run separately and are\n"
+            "          not covered by this box (see the RDS + service-band lines).\n"
+        )
 
     if c.services_usd_mo is not None:
         b.append(
