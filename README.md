@@ -72,7 +72,8 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
 | `--detect-accounts` | Auto-detect the member-account count from the CUR's `line_item_usage_account_id` column — **exact** for parquet, a labeled **lower bound** from the CSV sample. Feeds the service bands when `--accounts` isn't given. `cloudshell.sh` enables this by default. |
 | `--granularity hourly\|daily` | CUR granularity (hourly ≈ 24× the rows of daily). |
 | `--read-footers` | Exact raw line-item counts from parquet footers — now works on **`--s3`** as well as `--dir` (footer bytes only, never row data). `cloudshell.sh` enables this by default. |
-| `--sample N` | CSV files to sample per format for row estimation (default 20, spread across the size distribution). |
+| `--sample N` | CSV files to sample per format for row estimation (default 20, spread across the size distribution). Sampled files are read in parallel. |
+| `--all-files` | Read **every** CSV file instead of a sample — exact row count and an **exact** account count (not a lower bound), at the cost of downloading + parsing the whole CUR. Much slower on a large CUR; ignores `--sample`. Not enabled by `cloudshell.sh`. |
 | `--json` | Machine-readable output. |
 | `--rds-from-aws` | Size the RDS tier against the DB instance classes actually **orderable** in `--region` (via `describe-orderable-db-instance-options` + `describe-instance-types`); falls back to the built-in tiers if AWS is unreachable. `cloudshell.sh` enables this by default. |
 | `--cost` | Estimate **monthly cost** (RDS + poller Fargate + service bands, with a total) and the **EC2-equivalent** instances that hold the poller's CPU/memory. Live AWS Pricing API (needs `pricing:GetProducts`), falling back to an embedded us-east-1 snapshot. `cloudshell.sh` enables this by default. |
@@ -103,9 +104,14 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
   `line_item_usage_account_id`s in the CUR, used to pick the service bands.
 
 Parquet (CUR 2.0) and legacy CSV (`.csv` / `.csv.gz`) are both supported. Parquet
-row counts are exact from footers (`--read-footers`); legacy CSV row counts are
-estimated by sampling files spread across the size distribution (`--sample N`) and
-extrapolating by byte share.
+row counts are exact from footers (`--read-footers`), and the parquet account count
+is exact (columnar — only that one column is read). Legacy CSV row counts are
+estimated by sampling files spread across the size distribution (`--sample N`, read
+in parallel) and extrapolating by byte share, and the CSV account count from a
+sample is a lower bound — pass `--all-files` to read the whole CUR for exact CSV
+counts. Because the estimate only picks an instance *tier* (which is quantized),
+the sample is almost always enough; `--all-files` is there for when you want the
+exact numbers and don't mind the wait.
 
 ## Development
 

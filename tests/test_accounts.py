@@ -108,6 +108,38 @@ def test_from_dir_detect_accounts_csv_lower_bound(tmp_path):
     assert p.account_source == "CSV sample"
 
 
+def test_all_files_reads_everything_exact(tmp_path):
+    # 30 CSV files; --sample would read 20, but --all-files reads all 30 → exact
+    # rows and an exact (not lower-bound) account count.
+    for i in range(30):
+        (tmp_path / f"f{i:02d}.csv").write_bytes(
+            f"lineItem/UsageAccountId,c\n{1000 + i},1\n".encode()
+        )
+    p = profile.from_dir(str(tmp_path), sample=20, detect_accounts=True, all_files=True)
+    assert p.account_count == 30  # every distinct account, not a sampled subset
+    assert p.account_lower_bound is False
+    assert p.account_source == "CSV (exact)"
+    assert "exact count from all 30 files" in p.sample_note
+
+
+def test_scan_csv_parallel_results_match_sequential(tmp_path):
+    # Parallel execution must not scramble the per-file row accounting.
+    recs = []
+    for i in range(12):
+        body = b"h1,h2\n" + b"x,y\n" * (i + 1)
+        # rstrip so the fake reader yields lines like a real file (no trailing "")
+        recs.append(
+            profile._CsvRec(
+                ext="csv",
+                size=len(body),
+                open_lines=(lambda b=body: iter(b.rstrip(b"\n").split(b"\n"))),
+            )
+        )
+    est, sampled, total, _ = profile.scan_csv(recs, 12)  # sample all 12
+    assert total == 12 and sampled == 12
+    assert est == sum(range(1, 13))  # 1+2+...+12, exact since all read
+
+
 def test_detect_accounts_off_by_default(tmp_path):
     _write_parquet(str(tmp_path / "a.parquet"), ["100"])
     p = profile.from_dir(str(tmp_path))

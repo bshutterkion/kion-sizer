@@ -54,6 +54,13 @@ def run(args: list[str], out) -> int:
         help="CSV files to sample per format for row estimation (default 20)",
     )
     parser.add_argument(
+        "--all-files",
+        dest="all_files",
+        action="store_true",
+        help="read every CSV file instead of a sample — exact row count and exact "
+        "account count, but much slower on a large CUR (ignores --sample)",
+    )
+    parser.add_argument(
         "--detect-accounts",
         dest="detect_accounts",
         action="store_true",
@@ -99,6 +106,7 @@ def run(args: list[str], out) -> int:
             ns.sample,
             ns.read_footers,
             ns.detect_accounts,
+            ns.all_files,
         )
     except (profile.ProfileError, OSError) as e:
         print(f"error: {e}", file=out)
@@ -154,6 +162,7 @@ def _build_profile(
     sample: int,
     read_footers: bool,
     detect_accounts: bool,
+    all_files: bool,
 ):
     # from_dir/from_s3 own the footer/sampling/account passes (that's where the
     # I/O and progress bars live); this only picks the source and sets granularity.
@@ -163,6 +172,7 @@ def _build_profile(
             sample=sample,
             read_footers=read_footers,
             detect_accounts=detect_accounts,
+            all_files=all_files,
         )
     else:
         p = profile.from_s3(
@@ -170,6 +180,7 @@ def _build_profile(
             sample=sample,
             read_footers=read_footers,
             detect_accounts=detect_accounts,
+            all_files=all_files,
         )
 
     if gran in ("daily", "hourly"):
