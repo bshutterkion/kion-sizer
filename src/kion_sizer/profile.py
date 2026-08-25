@@ -1,7 +1,4 @@
-"""Turns a customer CUR (local dir or S3) into a CURProfile.
-
-Mirrors internal/profile/{profile,s3,footers,sample}.go.
-"""
+"""Turns a customer CUR (local dir or S3) into a CURProfile."""
 
 from __future__ import annotations
 

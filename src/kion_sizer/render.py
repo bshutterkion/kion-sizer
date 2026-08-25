@@ -1,8 +1,7 @@
-"""Formats a Recommendation for humans or machines. Mirrors internal/render.
+"""Formats a Recommendation for humans or machines.
 
-Output is byte-for-byte identical to the Go version: Go sorts top-level JSON map
-keys but keeps struct (services) keys in field order, and renders whole floats
-without a trailing .0.
+JSON output sorts the top-level keys but leaves nested (services, cost) keys in
+field order, and renders whole floats without a trailing .0.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ _BYTES_PER_GIB = 1 << 30
 
 
 def _go_float(f):
-    """Render floats the way Go's encoding/json does: whole values lose the .0."""
+    """Emit a whole float as an int, so JSON shows 4 rather than 4.0."""
     if isinstance(f, float) and f.is_integer():
         return int(f)
     return f

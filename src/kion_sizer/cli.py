@@ -1,4 +1,4 @@
-"""CLI: parses flags, runs the profile→model→render pipeline. Mirrors cmd/kion-sizer.
+"""CLI: parses flags, runs the profile→model→render pipeline.
 
 run(args, out) returns an exit code and writes to an injected writer so it is
 testable; main() wires it to argv/stdout.

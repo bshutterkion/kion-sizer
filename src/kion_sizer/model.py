@@ -1,6 +1,6 @@
 """Maps a CURProfile + calibration Config to a sizing Recommendation.
 
-Pure function of (profile, config, accounts); no I/O. Mirrors internal/model.
+Pure function of (profile, config, accounts); no I/O.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class Recommendation:
 
 
 def round_half_away(x: float) -> float:
-    """Round half away from zero, matching Go's math.Round."""
+    """Round half away from zero (Python's round() would round half to even)."""
     if x >= 0:
         return math.floor(x + 0.5)
     return math.ceil(x - 0.5)

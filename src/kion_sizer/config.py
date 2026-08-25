@@ -1,7 +1,7 @@
 """Calibration constants and instance lookup tables.
 
 The default config is shipped as package data so the tool is self-contained;
-callers may override it with a file via load(). Mirrors internal/config.
+callers may override it with a file via load().
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class Config:
 
 
 def _gv(v: float) -> str:
-    """Render a number the way Go's %v does (whole floats without a trailing .0)."""
+    """Render a number for an error message, dropping a whole float's .0."""
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     return str(v)
