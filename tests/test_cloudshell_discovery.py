@@ -21,6 +21,7 @@ _HERE = Path(__file__).parent
         "test_azure_cloudshell.sh",
         "test_gcp_cloudshell.sh",
         "test_kion_sizer_sh.sh",
+        "test_bootstrap.sh",
     ],
 )
 def test_cloudshell_discovery(script):

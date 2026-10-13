@@ -55,18 +55,30 @@ extra_for() {
   done
 }
 
+# Run a command quietly, but replay everything it printed if it fails, so a
+# network error or resolver conflict is visible instead of a bare "failed".
+_quiet() {
+  local out rc
+  out="$(mktemp)"
+  "$@" >"$out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] && cat "$out" >&2
+  rm -f "$out"
+  return "$rc"
+}
+
 bootstrap_uv() {
   local extra="$1"
   if ! command -v uv >/dev/null 2>&1; then
     log "# installing uv (provisions Python 3.12 + deps in your home dir)…"
-    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 \
-      || die "uv install failed"
+    _quiet bash -c 'set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh' \
+      || die "uv install failed (output above)"
     export PATH="$HOME/.local/bin:$PATH"
   fi
   command -v uv >/dev/null 2>&1 || die "uv not on PATH after install"
   log "# syncing runtime${extra:+ ($extra extra)}…"
-  ( cd "$REPO" && uv sync ${extra:+--extra "$extra"} ) >/dev/null 2>&1 \
-    || die "uv sync failed"
+  ( cd "$REPO" && _quiet uv sync ${extra:+--extra "$extra"} ) \
+    || die "uv sync failed (output above)"
 }
 
 main() {
