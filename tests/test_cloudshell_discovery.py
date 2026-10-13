@@ -16,7 +16,12 @@ _HERE = Path(__file__).parent
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 @pytest.mark.parametrize(
     "script",
-    ["test_cloudshell.sh", "test_azure_cloudshell.sh", "test_gcp_cloudshell.sh"],
+    [
+        "test_cloudshell.sh",
+        "test_azure_cloudshell.sh",
+        "test_gcp_cloudshell.sh",
+        "test_kion_sizer_sh.sh",
+    ],
 )
 def test_cloudshell_discovery(script):
     res = subprocess.run(["bash", str(_HERE / script)], capture_output=True, text=True)

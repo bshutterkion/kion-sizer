@@ -126,13 +126,19 @@ bash scripts/gcp-cloudshell.sh --dry-run
 Neither Azure nor GCP Cloud Shell has AWS credentials, so `--cost` prices from
 the embedded us-east-1 snapshot and the output says so.
 
-## Running the tool directly
+## Running from any shell
 
-If you already have a checkout and `uv`:
+The Cloud Shell scripts above discover the billing data for you. When you already
+know where it is — or the source has no discovery script (a downloaded CUR
+directory, OCI, a custom FOCUS source) — use `scripts/kion-sizer.sh`. It installs
+the runtime the same way, syncs only the cloud SDK the location needs, and passes
+every flag through to the tool:
 
 ```sh
-uv run kion-sizer --s3 s3://bucket/report/month/ --granularity hourly --accounts 700
-uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
+bash scripts/kion-sizer.sh --dir /path/to/cur-month/ --accounts 150 --read-footers --json
+bash scripts/kion-sizer.sh --s3 s3://bucket/report/month/ --granularity hourly --accounts 700
+bash scripts/kion-sizer.sh --custom-source s3://bucket/prefix/
+bash scripts/kion-sizer.sh --help        # every flag below
 ```
 
 | Flag | Meaning |
@@ -215,8 +221,8 @@ supported, Azure) and imports that spend. That is `--source gcp` with an AWS
 target:
 
 ```sh
-uv sync --extra gcp
-uv run kion-sizer --gcp-table my-proj.billing.gcp_billing_export_resource_v1_01ABCD --json
+bash scripts/gcp-cloudshell.sh                                  # discover the export
+bash scripts/gcp-cloudshell.sh --table my-proj.billing.gcp_billing_export_resource_v1_01ABCD --json
 ```
 
 Row counts and the member-account count come straight from BigQuery metadata, so
@@ -224,10 +230,14 @@ they are **exact** — no sampling, and `--read-footers` / `--all-files` /
 `--sample` do not apply. The peak billing month is chosen by `invoice.month`
 row count unless `--gcp-month` names one.
 
-Note that the GCP calibration constants are currently inherited from the AWS
-reference rather than measured, and every run says so.
+The standard and detailed exports are calibrated separately, because they differ
+by an order of magnitude: for the same spend a detailed export produces roughly
+16× the database rows. The GCP FOCUS export is not yet calibrated, and runs
+against it say so.
 
 ## Development
+
+For contributors working on the tool itself, not for running it:
 
 ```sh
 uv sync --extra dev          # dev pulls every implemented cloud
@@ -235,6 +245,7 @@ uv run pytest -q                 # Python unit + golden + discovery tests
 bash tests/test_cloudshell.sh    # cloudshell.sh discovery tests (also under pytest)
 bash tests/test_azure_cloudshell.sh  # azure-cloudshell.sh discovery tests
 bash tests/test_gcp_cloudshell.sh    # gcp-cloudshell.sh discovery tests
+bash tests/test_kion_sizer_sh.sh     # kion-sizer.sh wrapper tests
 bash tests/env/run.sh            # amazonlinux:2023 environment-fidelity test (needs Docker)
 ```
 

@@ -11,7 +11,14 @@ shape, coarse per-service bands, and (with `--cost`) a monthly cost estimate.
 It profiles every bulk billing source Kion ingests (AWS, Azure, GCP, OCI, custom
 FOCUS) and sizes an AWS deployment; an Azure target is designed but not built.
 Primary distribution is each cloud's own shell: `scripts/cloudshell.sh` (AWS),
-`scripts/azure-cloudshell.sh` and `scripts/gcp-cloudshell.sh`.
+`scripts/azure-cloudshell.sh` and `scripts/gcp-cloudshell.sh`, with
+`scripts/kion-sizer.sh` as a pass-through for everything else (a local CUR
+directory, OCI, custom sources, explicit locations).
+
+**User-facing instructions are always a bash script, never `uv`.** README and
+any external docs tell people to clone and run a script; `uv` is an
+implementation detail the scripts bootstrap. Only the Development section, which
+is for contributors, uses `uv` directly.
 
 **This repository is published publicly.** Design documents, calibration
 provenance naming real accounts, and references to Kion's internal source live
@@ -29,6 +36,7 @@ uv run kion-sizer --dir path/ --json     # run the tool locally
 bash tests/test_cloudshell.sh            # cloudshell.sh discovery tests standalone (also run under pytest)
 bash tests/test_azure_cloudshell.sh      # azure-cloudshell.sh, same pattern with a fake `az`
 bash tests/test_gcp_cloudshell.sh        # gcp-cloudshell.sh, fake `gcloud` + `bq`
+bash tests/test_kion_sizer_sh.sh         # kion-sizer.sh wrapper: extra inference, arg passthrough
 bash tests/env/run.sh                    # AL2023 container fidelity test (needs Docker; opt-in)
 RUN_ENV_TEST=1 uv run pytest tests/test_env_fidelity.py   # same test via pytest
 ```
