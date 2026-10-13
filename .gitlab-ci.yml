@@ -1,0 +1,40 @@
+# kion-sizer - GitLab CI/CD Pipeline
+# Runs the test suite and security scans on merge requests to main.
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+stages:
+  - test
+  - security
+
+variables:
+  SECRET_DETECTION_ENABLED: 'true'
+  SAST_EXCLUDED_PATHS: "spec, test, tests, tmp"
+  UV_VERSION: "0.11.6"
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+  # No TTY in CI; keep stderr free of progress bars.
+  KION_SIZER_NO_PROGRESS: "1"
+
+test:pytest:
+  stage: test
+  image: python:3.12-slim
+  interruptible: true
+  cache:
+    key:
+      files: [uv.lock]
+    paths: [.uv-cache]
+  before_script:
+    - pip install --quiet "uv==$UV_VERSION"
+    - uv sync --extra dev --frozen
+  script:
+    # The suite includes the hermetic Cloud Shell discovery tests (bash + fake
+    # CLIs) and the publishability guard. The Docker fidelity test is opt-in
+    # and skips here.
+    - uv run pytest -q

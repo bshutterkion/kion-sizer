@@ -2,14 +2,10 @@
 # (AWS, parquet, March 2026). Override any of these with --config.
 calibration_version: "reference-cur-2026-03 / aws-parquet"
 
-# CUR-volume -> load constants. rows_per_gib is the AGGREGATED PUC row count
-# (post-collapse), NOT raw CUR line items. raw_to_aggregated_ratio converts a
-# raw parquet line-item count (from footers) into aggregated rows; it is
-# customer-variable (depends on resource/service/tag shape) — treat as a guide.
-rows_per_gib: 791000          # aggregated PUC rows / GiB compressed parquet (13.48M rows / 17.05 GiB reference)
-raw_to_aggregated_ratio: 8.44 # ~113.8M raw line items / 13.48M aggregated rows (reference; varies by customer)
+# --- Kion-side constants (shared across clouds) -----------------------------
+# These describe Kion itself — the on-disk PUC row and the poller's heap
+# behavior — so they do not vary with the billing source or the target cloud.
 bytes_per_row: 1036           # on-disk PUC row size incl. indexes
-buffer_pool_fraction: 0.70           # InnoDB/Aurora buffer pool as fraction of DB RAM
 # Headroom above the largest payer-month shard: a fraction of the shard, floored.
 # 0.40 reproduces the reference headroom (~5 / 13 GiB) so the high end is unchanged;
 # the floor keeps tiny CURs from over-sizing, so small envs can land on db.t3.medium
@@ -17,21 +13,128 @@ buffer_pool_fraction: 0.70           # InnoDB/Aurora buffer pool as fraction of 
 buffer_pool_headroom_fraction: 0.40
 buffer_pool_headroom_floor_gib: 1
 
-# financials-poller heap (drives ECS task memory). poller_floor_gib is the real-world
-# minimum task provisioned regardless of data — adhoc envs run 4–6 GiB / 1 vCPU.
+# financials-poller heap (drives ECS task / pod memory). poller_floor_gib is the
+# real-world minimum provisioned regardless of data — adhoc envs run 4–6 GiB / 1 vCPU.
 poller_base_gib: 1.0
 poller_heap_gib_per_mrow: 0.85
 poller_headroom_fraction: 0.25
 poller_floor_gib: 4
 
-# Ordered ascending by RAM. First tier whose buffer pool covers the shard wins.
-rds_tiers:
-  - {name: "db.t3.medium",  ram_gib: 4}
-  - {name: "db.t3.large",   ram_gib: 8}
-  - {name: "db.r6g.large",  ram_gib: 16}
-  - {name: "db.r6g.xlarge", ram_gib: 32}
-  - {name: "db.r6g.2xlarge", ram_gib: 64}
-  - {name: "db.r6g.4xlarge", ram_gib: 128}
+# --- per-source: billing volume -> aggregated PUC rows ----------------------
+# rows_per_gib is the AGGREGATED PUC row count (post-collapse), NOT raw billing
+# line items. raw_to_aggregated_ratio converts a raw line-item count into
+# aggregated rows; it is customer-variable (depends on resource/service/tag
+# shape) — treat as a guide.
+#
+# Only the AWS row is measured. `inherited: true` means the values were copied
+# from the AWS reference and are NOT calibrated for that cloud; the output says
+# so explicitly rather than presenting them as measured.
+sources:
+  # Resolution is most-specific-first:
+  #   sources["<provider>/<format>"] -> sources["<provider>"] -> sources["default"]
+  # so only measured combinations need an entry here. Everything else inherits
+  # `default`, which is flagged inherited so every run says so out loud.
+  #
+  # Row volume depends on the report format as much as the provider: GCP's
+  # detailed export dwarfs its standard one, and a FOCUS export normalizes rows
+  # again (Azure's folds actual and amortized cost into one dataset, so it
+  # carries materially more rows than a single actual-cost export).
+  default:
+    calibration: "inherited-from-aws / UNCALIBRATED"
+    inherited: true
+    rows_per_gib: 791000          # aggregated PUC rows / GiB compressed parquet
+    raw_to_aggregated_ratio: 8.44 # raw line items / aggregated rows
+
+  # Custom billing sources are FOCUS-only (the portal has no proprietary reader
+  # for them), hosted in either S3 or Azure blob storage. Listed explicitly so
+  # the pair is discoverable even though it currently inherits the default.
+  custom/focus:
+    calibration: "inherited-from-aws / UNCALIBRATED"
+    inherited: true
+    rows_per_gib: 791000
+    raw_to_aggregated_ratio: 8.44
+
+  # OCI is a billing source only -- Kion is not deployed on OCI. Its cost
+  # reports count compartments as member accounts.
+  oci/cost-csv:
+    calibration: "inherited-from-aws / UNCALIBRATED"
+    inherited: true
+    rows_per_gib: 791000
+    raw_to_aggregated_ratio: 8.44
+
+  # The legacy AWS Detailed Billing Report. Its files carry total/rounding rows
+  # that Kion does not ingest and the sizer therefore does not count.
+  aws/dbr:
+    calibration: "inherited-from-aws / UNCALIBRATED"
+    inherited: true
+    rows_per_gib: 791000
+    raw_to_aggregated_ratio: 8.44
+
+  # Measured over 20 monthly periods of a reference Azure EA export by
+  # counting the distinct groups Kion collapses rows into: resource, product
+  # (meter + name + service), subscription, and resource group.
+  #
+  # That grouping carries NO date component, unlike GCP's. A whole month of
+  # daily rows for one resource collapses to a single stored row, so the ratio
+  # tracks days-in-month rather than customer size -- which makes it unusually
+  # stable across tenants, and structurally higher than a per-day collapse.
+  azure/usage-details:
+    calibration: "reference-export-2026-08 / azure-usage-details"
+    inherited: false
+    rows_per_gib: 791000
+    raw_to_aggregated_ratio: 22.35  # 13,055 raw / 584 aggregated over 20 months
+
+  # Measured over 4 months of a reference GCP billing export by counting the
+  # distinct groups Kion collapses rows into: project, SKU (id + description),
+  # resource name, the day of usage_start_time, and labels. That distinct count
+  # is the stored row count, so the ratio is observed rather than assumed.
+  #
+  # The two GCP exports differ by an order of magnitude and must not share a
+  # constant. Standard collapses ~26x because GCP emits hourly rows and Kion
+  # truncates to the day (confirmed: 732 distinct hours over 32 days). Detailed
+  # barely collapses at all, because resource.global_name is part of the key --
+  # so for the SAME spend a detailed export produced ~15.7x more database rows
+  # than the standard one. Which export a customer runs dominates their sizing.
+  gcp/standard:
+    calibration: "reference-export-2026-08 / gcp-standard"
+    inherited: false
+    rows_per_gib: 791000          # unused: GCP row counts are exact
+    raw_to_aggregated_ratio: 25.78  # 69,140 raw / 2,682 aggregated over 4 months
+  gcp/detailed:
+    calibration: "reference-export-2026-08 / gcp-detailed"
+    inherited: false
+    rows_per_gib: 791000
+    raw_to_aggregated_ratio: 2.64   # 111,191 raw / 42,039 aggregated over 4 months
+
+  # The one measured entry: AWS CUR, parquet, from the reference customer.
+  aws/cur:
+    calibration: "reference-cur-2026-03 / aws-parquet"
+    inherited: false
+    rows_per_gib: 791000          # 13.48M rows / 17.05 GiB reference
+    raw_to_aggregated_ratio: 8.44 # ~113.8M raw line items / 13.48M aggregated rows
+
+# --- per-target: the database the deployment runs on ------------------------
+# db_tiers are ordered ascending by RAM. The first tier whose buffer pool covers
+# the shard wins. buffer_pool_fraction is the InnoDB/Aurora buffer pool as a
+# fraction of DB RAM, which the managed services size differently.
+targets:
+  aws:
+    buffer_pool_fraction: 0.70
+    db_tiers:
+      - {name: "db.t3.medium",  ram_gib: 4}
+      - {name: "db.t3.large",   ram_gib: 8}
+      - {name: "db.r6g.large",  ram_gib: 16}
+      - {name: "db.r6g.xlarge", ram_gib: 32}
+      - {name: "db.r6g.2xlarge", ram_gib: 64}
+      - {name: "db.r6g.4xlarge", ram_gib: 128}
+  azure:
+    # Azure auto-manages innodb_buffer_pool_size at roughly 50-70% of RAM; the
+    # conservative end avoids under-sizing. Ladder and node types land with the
+    # Azure target itself — the registry rejects --target azure until then.
+    buffer_pool_fraction: 0.60
+    db_tiers: []
+  # No gcp target: Kion is not deployed on GCP. GCP appears under `sources`
+  # only, for customers whose spend is in GCP but whose Kion runs on AWS/Azure.
 
 # Core/compliance/cost service starting bands by account count. Starting points.
 # Values are ECS task CPU units / memory MiB / task count.

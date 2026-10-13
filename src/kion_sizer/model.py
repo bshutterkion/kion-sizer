@@ -1,6 +1,8 @@
-"""Maps a CURProfile + calibration Config to a sizing Recommendation.
+"""Maps a BillingProfile + calibration Config to a sizing Recommendation.
 
-Pure function of (profile, config, accounts); no I/O.
+Pure function of (profile, config, accounts, target); no I/O. The target is a
+TargetAdapter, which owns every cloud call, so this module never imports a
+cloud SDK.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .config import Config, InstanceTier, ServiceBand
+from .targets.base import ComputeShape
 
 _BYTES_PER_GIB = 1 << 30
 
@@ -21,21 +24,24 @@ class Recommendation:
     est_basis: str = ""
     raw_line_items: int = 0
     shard_gib: float = 0.0
-    rds: Optional[InstanceTier] = None
-    rds_exceeds_tiers: bool = False
-    rds_tier_source: str = ""
+    db: Optional[InstanceTier] = None
+    db_exceeds_tiers: bool = False
+    db_tier_source: str = ""
+    # The computed heap requirement. `compute` below is the provisionable shape
+    # the target snaps it to.
     poller_mem_gib: float = 0.0
     poller_vcpu: int = 0
-    # Nearest valid AWS Fargate task the computed heap maps onto (the raw
-    # poller_mem_gib above is a requirement, not a provisionable size).
-    poller_task_mem_gib: float = 0.0
-    poller_task_vcpu: int = 0
-    poller_task_cpu_units: int = 0
-    poller_task_exceeds: bool = False
+    compute: Optional[ComputeShape] = None
     accounts: int = 0
     services: Optional[ServiceBand] = None
     have_services: bool = False
     calibration_version: str = ""
+    source_cloud: str = "aws"
+    target_cloud: str = "aws"
+    source_calibration: str = ""
+    source_format: str = ""
+    calibration_inherited: bool = False
+    warnings: list = field(default_factory=list)
     # Populated by cost() when --cost is set; None otherwise (render stays quiet).
     cost: Optional["CostReport"] = None
 
@@ -47,18 +53,40 @@ def round_half_away(x: float) -> float:
     return math.ceil(x - 0.5)
 
 
-def recommend(p, c: Config, accounts: int) -> Recommendation:
+def recommend(
+    p, c: Config, accounts: int, target, *, source_cloud: str = "aws"
+) -> Recommendation:
+    # Calibration depends on the report format as much as the provider: a
+    # detailed export dwarfs a standard one, and FOCUS normalizes rows again.
+    report_format = getattr(p, "report_format", "")
+    src = c.source(source_cloud, report_format)
+    cal_key = f"{source_cloud}/{report_format}" if report_format else source_cloud
+    tgt = c.target(target.name)
     rec = Recommendation(
-        profile=p, accounts=accounts, calibration_version=c.calibration_version
+        profile=p,
+        accounts=accounts,
+        calibration_version=c.calibration_version,
+        source_cloud=source_cloud,
+        target_cloud=target.name,
+        source_calibration=src.calibration,
+        source_format=getattr(p, "format", ""),
+        calibration_inherited=src.inherited,
     )
+    if src.inherited:
+        rec.warnings.append(
+            f"UNCALIBRATED SOURCE ({cal_key}): row-volume constants are borrowed "
+            "from the AWS CUR reference, not measured for this billing format. "
+            "Estimates may be off; treat the database tier as a starting "
+            "point and validate against the customer's actual deployment."
+        )
 
     cur_gib = p.compressed_bytes / _BYTES_PER_GIB
     if p.have_raw_rows and p.raw_line_items > 0:
         rec.raw_line_items = p.raw_line_items
-        rec.est_rows = int(p.raw_line_items / c.raw_to_aggregated_ratio)
+        rec.est_rows = int(p.raw_line_items / src.raw_to_aggregated_ratio)
         rec.est_basis = "line items / aggregation ratio"
     else:
-        rec.est_rows = int(c.rows_per_gib * cur_gib)
+        rec.est_rows = int(src.rows_per_gib * cur_gib)
         if p.has_csv:
             rec.est_basis = (
                 "compressed bytes (WARN: rows_per_gib is parquet-calibrated; "
@@ -71,8 +99,8 @@ def recommend(p, c: Config, accounts: int) -> Recommendation:
     headroom = max(
         c.buffer_pool_headroom_floor, c.buffer_pool_headroom_frac * rec.shard_gib
     )
-    required_ram = (rec.shard_gib + headroom) / c.buffer_pool_fraction
-    rec.rds, rec.rds_exceeds_tiers = pick_tier(c.rds_tiers, required_ram)
+    required_ram = (rec.shard_gib + headroom) / tgt.buffer_pool_fraction
+    rec.db, rec.db_exceeds_tiers = pick_tier(tgt.db_tiers, required_ram)
 
     mrows = rec.est_rows / 1_000_000
     poller_mem = (c.poller_base_gib + c.poller_heap_gib_per_mrow * mrows) * (
@@ -82,11 +110,7 @@ def recommend(p, c: Config, accounts: int) -> Recommendation:
     rec.poller_mem_gib = round_half_away(poller_mem * 10) / 10
     rec.poller_vcpu = poller_vcpu(rec.poller_mem_gib)
 
-    cpu_units, mem_mib, exceeds = fargate_task(rec.poller_mem_gib, rec.poller_vcpu)
-    rec.poller_task_cpu_units = cpu_units
-    rec.poller_task_mem_gib = mem_mib / 1024
-    rec.poller_task_vcpu = cpu_units // 1024
-    rec.poller_task_exceeds = exceeds
+    rec.compute = target.snap_compute(rec.poller_mem_gib, rec.poller_vcpu)
 
     if accounts > 0:
         rec.services = pick_band(c.service_bands, accounts)
@@ -120,40 +144,10 @@ def poller_vcpu(mem_gib: float) -> int:
     return 8
 
 
-def _mib_range(lo: int, hi: int, step: int) -> list[int]:
-    return list(range(lo, hi + 1, step))
 
 
-# AWS Fargate valid task sizes (fixed platform constants — AWS exposes no API
-# for these, and they don't vary by region): cpu units -> the discrete list of
-# valid memory values (MiB). The poller's 4 GiB floor keeps us at 1 vCPU (1024)
-# or above, so the sub-1-vCPU tiers are omitted.
-_FARGATE_TASKS: list[tuple[int, list[int]]] = [
-    (1024, _mib_range(2048, 8192, 1024)),  # 1 vCPU:  2-8 GB /1
-    (2048, _mib_range(4096, 16384, 1024)),  # 2 vCPU:  4-16 GB /1
-    (4096, _mib_range(8192, 30720, 1024)),  # 4 vCPU:  8-30 GB /1
-    (8192, _mib_range(16384, 61440, 4096)),  # 8 vCPU:  16-60 GB /4
-    (16384, _mib_range(32768, 122880, 8192)),  # 16 vCPU: 32-120 GB /8
-    (32768, [61440, 122880, 249856]),  # 32 vCPU: 60, 120, 244 GB (irregular)
-]
 
 
-def fargate_task(mem_gib: float, vcpu: int) -> tuple[int, int, bool]:
-    """Snap a computed (mem_gib, vcpu) requirement to the smallest valid Fargate
-    task that provides at least that CPU and memory. Returns
-    (cpu_units, mem_mib, exceeds_largest_task).
-    """
-    req_cpu = vcpu * 1024
-    req_mem = math.ceil(mem_gib * 1024)
-    for cpu, mems in _FARGATE_TASKS:
-        if cpu < req_cpu:
-            continue
-        for mem in mems:  # ascending
-            if mem >= req_mem:
-                return cpu, mem, False
-        # memory doesn't fit this tier's max; escalate to the next (larger) CPU.
-    cpu, mems = _FARGATE_TASKS[-1]
-    return cpu, mems[-1], True
 
 
 # --- cost estimation --------------------------------------------------------
@@ -296,20 +290,20 @@ def cost(rec: Recommendation, prices) -> CostReport:
         region_label=prices.region_label,
         source=prices.source,
         hours_per_month=hpm,
-        rds_name=rec.rds.name,
+        rds_name=rec.db.name,
     )
 
-    rds_hr = prices.rds_hr(rec.rds.name)
+    rds_hr = prices.rds_hr(rec.db.name)
     r.rds_usd_mo = round(rds_hr * hpm, 2) if rds_hr else None
 
     # Poller as deployed on Fargate (the discrete task size).
-    r.poller_task_vcpu = rec.poller_task_vcpu
-    r.poller_task_mem_gib = rec.poller_task_mem_gib
+    r.poller_task_vcpu = rec.compute.vcpu
+    r.poller_task_mem_gib = rec.compute.mem_gib
     r.poller_fargate_x86_hr = _fargate_hr(
-        rec.poller_task_vcpu, rec.poller_task_mem_gib, far, "x86"
+        rec.compute.vcpu, rec.compute.mem_gib, far, "x86"
     )
     r.poller_fargate_arm_hr = _fargate_hr(
-        rec.poller_task_vcpu, rec.poller_task_mem_gib, far, "arm"
+        rec.compute.vcpu, rec.compute.mem_gib, far, "arm"
     )
     r.poller_fargate_x86_usd_mo = round(r.poller_fargate_x86_hr * hpm, 2)
     r.poller_fargate_arm_usd_mo = round(r.poller_fargate_arm_hr * hpm, 2)

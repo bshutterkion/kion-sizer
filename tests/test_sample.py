@@ -1,7 +1,8 @@
 import gzip
 import io
 
-from kion_sizer import profile
+from kion_sizer.sources import aws
+from kion_sizer.sources import base as profile
 
 
 def test_count_rows_from_reader_excludes_header():
@@ -37,7 +38,7 @@ def test_sample_more_files_when_available(tmp_path):
     # 30 files of varying size; --sample 10 should read 10 spread across sizes.
     for i in range(30):
         (tmp_path / f"f{i:02d}.csv").write_bytes(b"h1,h2\n" + b"x,y\n" * (i + 1))
-    est, sampled, total = profile.sample_dir_raw_rows(str(tmp_path), 10)
+    est, sampled, total = aws.sample_dir_raw_rows(str(tmp_path), 10)
     assert total == 30
     assert sampled == 10
     assert est > 0
@@ -50,7 +51,7 @@ def test_sample_dir_mixed_formats_exact(tmp_path):
         w.write(b"col1,col2\n" + b"a,b\n" * 100)
     with gzip.open(tmp_path / "d.csv.gz", "wb") as w:
         w.write(b"col1,col2\n" + b"a,b\n" * 20)
-    est, sampled, total = profile.sample_dir_raw_rows(str(tmp_path), 3)
+    est, sampled, total = aws.sample_dir_raw_rows(str(tmp_path), 3)
     assert est == 200
     assert total == 4
     assert sampled == 4

@@ -192,8 +192,8 @@ bootstrap_uv() {
     export PATH="$HOME/.local/bin:$PATH"
   fi
   command -v uv >/dev/null 2>&1 || die "uv not on PATH after install"
-  log "# syncing runtime (uv sync)…"
-  ( cd "$REPO" && uv sync ) >/dev/null 2>&1 || die "uv sync failed"
+  log "# syncing runtime (uv sync --extra aws)…"
+  ( cd "$REPO" && uv sync --extra aws ) >/dev/null 2>&1 || die "uv sync failed"
 }
 
 # --- main -------------------------------------------------------------------

@@ -7,7 +7,8 @@ import json
 
 import pytest
 
-from kion_sizer import cli, config, rds_catalog
+from kion_sizer import cli, config
+from kion_sizer.targets import aws as rds_catalog
 
 
 class _FakePaginator:
@@ -162,5 +163,6 @@ def test_cli_falls_back_when_aws_unavailable(monkeypatch, tmp_path):
     code = cli.run(["--dir", _sparse(tmp_path), "--rds-from-aws", "--json"], out)
     assert code == 0
     d = json.loads(out.getvalue())
-    assert d["rds_tier_source"].startswith("built-in defaults (AWS lookup failed")
-    assert d["rds_instance"] == "db.t3.medium"  # static tiers still applied
+    db = d["target"]["database"]
+    assert db["source"].startswith("built-in defaults (AWS lookup failed")
+    assert db["name"] == "db.t3.medium"  # static tiers still applied

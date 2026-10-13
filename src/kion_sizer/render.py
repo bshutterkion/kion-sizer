@@ -1,7 +1,9 @@
 """Formats a Recommendation for humans or machines.
 
-JSON output sorts the top-level keys but leaves nested (services, cost) keys in
-field order, and renders whole floats without a trailing .0.
+JSON nests under `source` and `target` so the two axes stay legible when they
+differ. Whole floats render without a trailing .0. Warnings appear near the top
+of the text output, not the tail: an uncalibrated source or a pod that will not
+schedule are the two things a field engineer most needs to see first.
 """
 
 from __future__ import annotations
@@ -23,16 +25,30 @@ def _go_float(f):
 def render_text(r: Recommendation) -> str:
     b = []
     b.append("kion-sizer recommendation\n")
-    b.append(f"  calibration: {r.calibration_version}\n\n")
-
-    b.append("CUR profile:\n")
-    b.append(f"  files:            {r.profile.file_count}\n")
+    # The pair that was actually applied, not the file-level version: an Azure
+    # run calibrated against Azure data should not print the AWS reference.
+    b.append(f"  calibration: {r.source_calibration or r.calibration_version}\n")
     b.append(
-        f"  compressed bytes: {r.profile.compressed_bytes / _BYTES_PER_GIB:.1f} GiB\n"
+        f"  source: {r.source_cloud.upper()}    "
+        f"target: {r.target_cloud.upper()}\n"
+    )
+    if r.warnings:
+        b.append("\n")
+        for w in r.warnings:
+            b.append(f"  !! {w}\n")
+    b.append("\n")
+
+    b.append("Billing profile:\n")
+    unit = getattr(r.profile, "unit_label", "files")
+    byte_label = getattr(r.profile, "byte_label", "compressed bytes")
+    b.append(f"  {unit + ':':<18}{r.profile.file_count}\n")
+    b.append(
+        f"  {byte_label + ':':<18}"
+        f"{r.profile.compressed_bytes / _BYTES_PER_GIB:.1f} GiB\n"
     )
     if r.raw_line_items > 0:
         src = r.profile.sample_note if r.profile.sample_note else "from parquet footers"
-        b.append(f"  CUR line items:   {r.raw_line_items} (raw, {src})\n")
+        b.append(f"  billing line items: {r.raw_line_items} (raw, {src})\n")
     b.append(f"  aggregated PUC rows: {r.est_rows} (est. from {r.est_basis})\n")
     b.append(f"  peak shard:       {r.shard_gib:.1f} GiB\n")
     if getattr(r.profile, "have_accounts", False):
@@ -41,6 +57,9 @@ def render_text(r: Recommendation) -> str:
             f"  member accounts:  {r.profile.account_count}{lb} "
             f"(auto-detected from {r.profile.account_source})\n"
         )
+    note = getattr(r.profile, "volume_note", "")
+    if note:
+        b.append(f"  NOTE: {note}\n")
     if r.raw_line_items > 0:
         b.append(
             "  NOTE: aggregated rows derived via a customer-variable raw→aggregated "
@@ -52,23 +71,17 @@ def render_text(r: Recommendation) -> str:
             "(hourly ~24x rows of daily)\n"
         )
 
-    b.append("\nRecommended starting sizes (AWS):\n")
-    rds = r.rds.name
-    if r.rds_exceeds_tiers:
-        rds += "  (!! exceeds known tiers — needs custom sizing/sharding review)"
-    b.append(f"  RDS:              {rds} ({r.rds.ram_gib:.0f} GiB RAM)\n")
-    if r.rds_tier_source:
-        b.append(f"    instance classes: {r.rds_tier_source}\n")
+    b.append(f"\nRecommended starting sizes ({r.target_cloud.upper()}):\n")
+    db = r.db.name
+    if r.db_exceeds_tiers:
+        db += "  (!! exceeds known tiers — needs custom sizing/sharding review)"
+    b.append(f"  database:         {db} ({r.db.ram_gib:.0f} GiB RAM)\n")
+    if r.db_tier_source:
+        b.append(f"    instance classes: {r.db_tier_source}\n")
     b.append(
         f"  financials-poller heap requirement: {r.poller_mem_gib:.1f} GiB mem, {r.poller_vcpu} vCPU\n"
     )
-    task = ""
-    if r.poller_task_exceeds:
-        task = "  (!! exceeds largest Fargate task — needs custom/EC2 sizing)"
-    b.append(
-        f"  financials-poller Fargate task: {r.poller_task_mem_gib:.0f} GiB mem, "
-        f"{r.poller_task_vcpu} vCPU ({r.poller_task_cpu_units} CPU units){task}\n"
-    )
+    b.append(_render_compute(r.compute))
     if r.have_services:
         s = r.services
         b.append(
@@ -84,6 +97,32 @@ def render_text(r: Recommendation) -> str:
         b.append(_render_cost(r.cost))
 
     return "".join(b)
+
+
+def _render_compute(c) -> str:
+    """Render the provisionable shape. Branches on kind so a Kubernetes target
+    describes a pod plus the node pool that can actually schedule it."""
+    if c.kind == "fargate_task":
+        note = (
+            "  (!! exceeds largest Fargate task — needs custom/EC2 sizing)"
+            if c.exceeds
+            else ""
+        )
+        return (
+            f"  financials-poller Fargate task: {c.mem_gib:.0f} GiB mem, "
+            f"{c.vcpu:.0f} vCPU ({c.cpu_units} CPU units){note}\n"
+        )
+    note = "  (!! no candidate node holds this pod)" if c.exceeds else ""
+    out = (
+        f"  financials-poller pod: {c.mem_gib:.1f} GiB mem, "
+        f"{c.cpu_millicores}m CPU{note}\n"
+    )
+    if c.node_machine_type:
+        out += (
+            f"  node pool:        {c.node_count} x {c.node_machine_type} "
+            f"({c.node_allocatable_gib:.1f} GiB allocatable each)\n"
+        )
+    return out
 
 
 def _usd_mo(v) -> str:
@@ -161,28 +200,51 @@ def _ec2_row(o) -> str:
 
 
 def render_json(r: Recommendation) -> str:
-    # Keys inserted in alphabetical order to match Go's sorted map marshaling.
+    p = r.profile
     out = {
-        "accounts": r.accounts,
         "calibration_version": r.calibration_version,
-        "est_basis": r.est_basis,
-        "est_rows": r.est_rows,
-        "poller_mem_gib": _go_float(r.poller_mem_gib),
-        "poller_vcpu": r.poller_vcpu,
-        "poller_task_mem_gib": _go_float(r.poller_task_mem_gib),
-        "poller_task_vcpu": r.poller_task_vcpu,
-        "poller_task_cpu_units": r.poller_task_cpu_units,
-        "poller_task_exceeds": r.poller_task_exceeds,
-        "raw_line_items": r.raw_line_items,
-        "rds_exceeds_tiers": r.rds_exceeds_tiers,
-        "rds_instance": r.rds.name,
-        "rds_ram_gib": _go_float(r.rds.ram_gib),
-        "rds_tier_source": r.rds_tier_source,
-        "shard_gib": _go_float(r.shard_gib),
+        "source": {
+            "cloud": r.source_cloud,
+            "calibration": r.source_calibration,
+            "calibration_inherited": r.calibration_inherited,
+            "location": getattr(p, "source", ""),
+            "unit_label": getattr(p, "unit_label", "files"),
+            "unit_count": p.file_count,
+            "bytes": p.compressed_bytes,
+            "byte_label": getattr(p, "byte_label", "compressed bytes"),
+            "granularity": p.granularity,
+            "raw_line_items": r.raw_line_items,
+            "est_rows": r.est_rows,
+            "est_basis": r.est_basis,
+            "shard_gib": _go_float(r.shard_gib),
+            "volume_note": getattr(p, "volume_note", ""),
+        },
+        "target": {
+            "cloud": r.target_cloud,
+            "database": {
+                "name": r.db.name,
+                "ram_gib": _go_float(r.db.ram_gib),
+                "source": r.db_tier_source,
+                "exceeds_tiers": r.db_exceeds_tiers,
+            },
+            "poller_requirement": {
+                "mem_gib": _go_float(r.poller_mem_gib),
+                "vcpu": r.poller_vcpu,
+            },
+            "compute": _compute_json(r.compute),
+        },
+        "accounts": r.accounts,
+        "warnings": list(r.warnings),
     }
+    if getattr(p, "have_accounts", False):
+        out["source"]["accounts"] = {
+            "count": p.account_count,
+            "lower_bound": p.account_lower_bound,
+            "detected_from": p.account_source,
+        }
     if r.have_services:
         s = r.services
-        out["services"] = {
+        out["target"]["services"] = {
             "max_accounts": s.max_accounts,
             "core_tasks": s.core_tasks,
             "core_cpu": s.core_cpu,
@@ -192,11 +254,27 @@ def render_json(r: Recommendation) -> str:
             "compliance_mem_mib": s.compliance_mem_mib,
         }
     if r.cost is not None:
-        out["cost"] = _cost_json(r.cost)
-    # Go json.MarshalIndent re-sorts ALL map keys; re-sort the top level by key
-    # while leaving the (dict) services/cost values in field order.
-    ordered = {k: out[k] for k in sorted(out.keys())}
-    return json.dumps(ordered, indent=2)
+        out["target"]["cost"] = _cost_json(r.cost)
+    return json.dumps(out, indent=2)
+
+
+def _compute_json(c) -> dict:
+    """Emit only the fields this shape's kind populates."""
+    out = {
+        "kind": c.kind,
+        "vcpu": _go_float(c.vcpu),
+        "mem_gib": _go_float(c.mem_gib),
+        "exceeds": c.exceeds,
+    }
+    if c.kind == "fargate_task":
+        out["cpu_units"] = c.cpu_units
+    else:
+        out["cpu_millicores"] = c.cpu_millicores
+        out["node_machine_type"] = c.node_machine_type
+        out["node_mem_gib"] = _go_float(c.node_mem_gib)
+        out["node_allocatable_gib"] = _go_float(c.node_allocatable_gib)
+        out["node_count"] = c.node_count
+    return out
 
 
 def _cost_json(c) -> dict:

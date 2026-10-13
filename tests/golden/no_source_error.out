@@ -1,1 +1,1 @@
-error: exactly one of --dir or --s3 is required
+error: exactly one of --dir, --s3, --gcp-table, --azure-container, --oci-bucket, or --custom-source is required

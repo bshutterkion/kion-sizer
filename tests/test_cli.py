@@ -1,4 +1,5 @@
 import io
+import json
 
 from kion_sizer import cli, pricing
 
@@ -10,7 +11,7 @@ def test_run_dir_human_output(tmp_path):
     out = io.StringIO()
     code = cli.run(["--dir", str(tmp_path), "--accounts", "40"], out)
     assert code == 0, out.getvalue()
-    assert "RDS:" in out.getvalue()
+    assert "database:" in out.getvalue()
 
 
 def test_run_cost_flag_appends_cost_block(tmp_path, monkeypatch):
@@ -89,9 +90,9 @@ def test_rds_from_aws_defaults_region_when_unset(tmp_path, monkeypatch):
         seen["region"] = region
         from kion_sizer import config
 
-        return config.default().rds_tiers
+        return config.default().target("aws").db_tiers
 
-    monkeypatch.setattr("kion_sizer.rds_catalog.orderable_tiers", fake_orderable)
+    monkeypatch.setattr("kion_sizer.targets.aws.orderable_tiers", fake_orderable)
     f = tmp_path / "x.parquet"
     with open(f, "wb") as fh:
         fh.truncate(1 << 30)
@@ -106,10 +107,97 @@ def test_run_requires_source():
     out = io.StringIO()
     code = cli.run([], out)
     assert code != 0
-    assert "exactly one of --dir or --s3" in out.getvalue()
+    assert "exactly one of --dir, --s3, --gcp-table, --azure-container" in out.getvalue()
 
 
 def test_run_both_sources_errors(tmp_path):
     out = io.StringIO()
     code = cli.run(["--dir", str(tmp_path), "--s3", "s3://b/p/"], out)
     assert code == 2
+
+
+def test_source_and_target_default_to_aws(tmp_path):
+    (tmp_path / "x.parquet").write_bytes(b"\0" * 1024)
+    out = io.StringIO()
+    assert cli.run(["--dir", str(tmp_path), "--json"], out) == 0
+    obj = json.loads(out.getvalue())
+    assert obj["source"]["cloud"] == "aws"
+    assert obj["target"]["cloud"] == "aws"
+
+
+def test_unimplemented_target_is_a_clean_error(tmp_path):
+    (tmp_path / "x.parquet").write_bytes(b"\0" * 1024)
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--target", "azure"], out)
+    assert code == 1
+    assert "not yet implemented" in out.getvalue()
+
+
+def test_gcp_target_is_a_usage_error_pointing_at_source(tmp_path):
+    (tmp_path / "x.parquet").write_bytes(b"\0" * 1024)
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--target", "gcp"], out)
+    assert code == 2
+    assert "billing source only" in out.getvalue()
+
+
+def test_source_that_cannot_read_the_location_fails_cleanly(tmp_path):
+    (tmp_path / "x.parquet").write_bytes(b"\0" * 1024)
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--source", "oci"], out)
+    assert code == 1
+    assert "error:" in out.getvalue()
+
+
+def test_source_contradicting_the_location_flag_is_a_usage_error():
+    out = io.StringIO()
+    code = cli.run(["--s3", "s3://b/p/", "--source", "gcp"], out)
+    assert code == 2
+    assert "contradicts" in out.getvalue()
+
+
+def test_invalid_source_choice_is_a_usage_error():
+    out = io.StringIO()
+    assert cli.run(["--dir", "/tmp", "--source", "aliyun"], out) == 2
+
+
+def test_gcp_table_implies_the_gcp_source(monkeypatch):
+    # Patch client creation so the test never reaches the network; what matters
+    # is that resolution routed to the gcp source at all.
+    from kion_sizer.sources import base
+
+    def no_client(project):
+        raise base.ProfileError("no credentials (test)")
+
+    monkeypatch.setattr("kion_sizer.sources.gcp._make_client", no_client)
+    out = io.StringIO()
+    code = cli.run(["--gcp-table", "proj-1234.billing_export.gcp_billing_export_v1_ABC", "--json"], out)
+    assert code == 1
+    assert "no credentials (test)" in out.getvalue()
+    assert "exactly one of" not in out.getvalue()
+
+
+def test_gcp_table_contradicting_source_is_a_usage_error():
+    out = io.StringIO()
+    code = cli.run(["--gcp-table", "proj-1234.billing_export.gcp_billing_export_v1_ABC", "--source", "aws"], out)
+    assert code == 2
+    assert "contradicts" in out.getvalue()
+
+
+def test_two_location_flags_is_a_usage_error(tmp_path):
+    out = io.StringIO()
+    code = cli.run(["--dir", str(tmp_path), "--gcp-table", "proj-1234.billing_export.gcp_billing_export_v1_ABC"], out)
+    assert code == 2
+    assert "exactly one of" in out.getvalue()
+
+
+def test_file_scan_flags_warn_on_a_non_file_source(monkeypatch):
+    from kion_sizer.sources import base
+
+    monkeypatch.setattr(
+        "kion_sizer.sources.gcp._make_client",
+        lambda project: (_ for _ in ()).throw(base.ProfileError("stop")),
+    )
+    out = io.StringIO()
+    cli.run(["--gcp-table", "proj-1234.billing_export.gcp_billing_export_v1_ABC", "--read-footers", "--all-files"], out)
+    assert "ignored for --source gcp" in out.getvalue()

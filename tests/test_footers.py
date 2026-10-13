@@ -1,7 +1,7 @@
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from kion_sizer import profile
+from kion_sizer.sources import aws as profile
 
 
 def _write_parquet(path, n):

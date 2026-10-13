@@ -3,9 +3,10 @@ name = "kion-sizer"
 version = "0.1.0"
 description = "Recommend AWS RDS + financials-poller ECS sizing for a Kion deployment from a customer's CUR."
 requires-python = ">=3.12"
+# Base stays tiny: the cloud SDKs live in per-cloud extras so a GCP CloudShell
+# session (fixed 5 GB $HOME, not expandable) does not pay for boto3 + pyarrow it
+# will never call.
 dependencies = [
-    "boto3>=1.34",
-    "pyarrow>=15",
     "pyyaml>=6",
     "tqdm>=4.66",
 ]
@@ -14,7 +15,18 @@ dependencies = [
 kion-sizer = "kion_sizer.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+aws = ["boto3>=1.34", "pyarrow>=15"]
+azure = ["azure-identity>=1.15", "azure-storage-blob>=12.19", "pyarrow>=15"]
+gcp = ["google-cloud-bigquery>=3.17"]
+# dev pulls every implemented cloud so the whole suite runs from one sync.
+dev = [
+    "pytest>=8",
+    "boto3>=1.34",
+    "pyarrow>=15",
+    "google-cloud-bigquery>=3.17",
+    "azure-identity>=1.15",
+    "azure-storage-blob>=12.19",
+]
 
 [build-system]
 requires = ["hatchling"]

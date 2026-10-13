@@ -1,27 +1,50 @@
 {
-  "accounts": 700,
   "calibration_version": "reference-cur-2026-03 / aws-parquet",
-  "est_basis": "compressed bytes",
-  "est_rows": 174020000,
-  "poller_mem_gib": 186.1,
-  "poller_task_cpu_units": 32768,
-  "poller_task_exceeds": false,
-  "poller_task_mem_gib": 244,
-  "poller_task_vcpu": 32,
-  "poller_vcpu": 8,
-  "raw_line_items": 0,
-  "rds_exceeds_tiers": true,
-  "rds_instance": "db.r6g.4xlarge",
-  "rds_ram_gib": 128,
-  "rds_tier_source": "",
-  "services": {
-    "max_accounts": 1000000,
-    "core_tasks": 2,
-    "core_cpu": 2048,
-    "core_mem_mib": 4096,
-    "compliance_tasks": 2,
-    "compliance_cpu": 4096,
-    "compliance_mem_mib": 8192
+  "source": {
+    "cloud": "aws",
+    "calibration": "reference-cur-2026-03 / aws-parquet",
+    "calibration_inherited": false,
+    "location": "<DIR>",
+    "unit_label": "files",
+    "unit_count": 1,
+    "bytes": 236223201280,
+    "byte_label": "compressed bytes",
+    "granularity": "unknown",
+    "raw_line_items": 0,
+    "est_rows": 174020000,
+    "est_basis": "compressed bytes",
+    "shard_gib": 167.90322959423065,
+    "volume_note": ""
   },
-  "shard_gib": 167.90322959423065
+  "target": {
+    "cloud": "aws",
+    "database": {
+      "name": "db.r6g.4xlarge",
+      "ram_gib": 128,
+      "source": "",
+      "exceeds_tiers": true
+    },
+    "poller_requirement": {
+      "mem_gib": 186.1,
+      "vcpu": 8
+    },
+    "compute": {
+      "kind": "fargate_task",
+      "vcpu": 32,
+      "mem_gib": 244,
+      "exceeds": false,
+      "cpu_units": 32768
+    },
+    "services": {
+      "max_accounts": 1000000,
+      "core_tasks": 2,
+      "core_cpu": 2048,
+      "core_mem_mib": 4096,
+      "compliance_tasks": 2,
+      "compliance_cpu": 4096,
+      "compliance_mem_mib": 8192
+    }
+  },
+  "accounts": 700,
+  "warnings": []
 }

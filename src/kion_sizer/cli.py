@@ -10,7 +10,9 @@ import argparse
 import os
 import sys
 
-from . import config, model, pricing, profile, rds_catalog, render
+from . import config, model, render, sources, targets
+from .sources.base import ProfileError
+from .targets.base import TargetError
 
 
 class _UsageError(Exception):
@@ -38,9 +40,61 @@ def run(args: list[str], out) -> int:
     parser = _SilentParser(out, prog="kion-sizer", add_help=True, allow_abbrev=False)
     parser.add_argument("--dir", default="")
     parser.add_argument("--s3", dest="s3", default="")
+    parser.add_argument(
+        "--gcp-table",
+        dest="gcp_table",
+        default="",
+        help="BigQuery billing export table as PROJECT.DATASET.TABLE",
+    )
+    parser.add_argument(
+        "--azure-container",
+        dest="azure_container",
+        default="",
+        help="Azure Cost Management export location "
+        "(https://<account>.blob.core.windows.net/<container>/<path>)",
+    )
+    parser.add_argument(
+        "--azure-month",
+        dest="azure_month",
+        default="",
+        help="billing month YYYYMM to size (default: the peak period by bytes)",
+    )
+    parser.add_argument(
+        "--oci-bucket",
+        dest="oci_bucket",
+        default="",
+        help="OCI cost reports "
+        "(https://objectstorage.<region>.oraclecloud.com/n/<ns>/b/<bucket>/o/<prefix>)",
+    )
+    parser.add_argument(
+        "--custom-source",
+        dest="custom_source",
+        default="",
+        help="custom billing source location (s3://bucket/prefix/, or an Azure "
+        "blob URL). Custom sources are always FOCUS-formatted.",
+    )
+    parser.add_argument(
+        "--gcp-month",
+        dest="gcp_month",
+        default="",
+        help="billing month YYYYMM to size (default: the peak month by rows)",
+    )
     parser.add_argument("--config", dest="config", default="")
     parser.add_argument("--accounts", type=int, default=0)
     parser.add_argument("--granularity", default="unknown")
+    parser.add_argument(
+        "--source",
+        choices=("aws", "azure", "gcp", "oci", "custom"),
+        default="",
+        help="billing data source (default: inferred from the location flag, else aws)",
+    )
+    parser.add_argument(
+        "--target",
+        choices=("aws", "azure", "gcp"),
+        default="aws",
+        help="deployment target to size for (default: aws). GCP is a billing "
+        "source only — Kion is not deployed on GCP.",
+    )
     parser.add_argument(
         "--read-footers",
         dest="read_footers",
@@ -88,9 +142,70 @@ def run(args: list[str], out) -> int:
     except _UsageError:
         return 2
 
-    if (ns.dir == "") == (ns.s3 == ""):
-        print("error: exactly one of --dir or --s3 is required", file=out)
+    # Exactly one location flag, and each implies (or leaves open) a source.
+    locations = [
+        ("--dir", ns.dir, ""),          # ambiguous: any cloud's export downloads locally
+        ("--s3", ns.s3, "aws"),
+        ("--gcp-table", ns.gcp_table, "gcp"),
+        ("--azure-container", ns.azure_container, "azure"),
+        ("--oci-bucket", ns.oci_bucket, "oci"),
+        ("--custom-source", ns.custom_source, "custom"),
+    ]
+    given = [(flag, val, imp) for flag, val, imp in locations if val]
+    if len(given) != 1:
+        print(
+            "error: exactly one of --dir, --s3, --gcp-table, --azure-container, "
+            "--oci-bucket, or --custom-source is required",
+            file=out,
+        )
         return 2
+    loc_flag, location, implied = given[0]
+
+    # An explicit --source wins, but may not contradict the location flag.
+    if ns.source and implied and ns.source != implied:
+        print(
+            f"error: --source {ns.source} contradicts {loc_flag}, which implies "
+            f"{implied}",
+            file=out,
+        )
+        return 2
+    source_cloud = ns.source or implied or "aws"
+
+    # Flags that only mean something to a file-scanning source. Warn rather than
+    # silently ignoring them, so a wrong invocation is visible.
+    if source_cloud == "gcp":
+        noop = [
+            name
+            for name, val in (
+                ("--read-footers", ns.read_footers),
+                ("--all-files", ns.all_files),
+                ("--sample", ns.sample != 20),
+            )
+            if val
+        ]
+        if noop:
+            print(
+                f"warning: {', '.join(noop)} ignored for --source gcp "
+                "(row counts come from BigQuery metadata and are already exact)",
+                file=out,
+            )
+
+    # Resolve the target before profiling, so an unusable target fails
+    # immediately rather than after a long CUR scan. A GCP target is a usage
+    # error (there is no such deployment), not a runtime one.
+    if ns.target in targets.SOURCE_ONLY:
+        print(
+            f"error: Kion is not deployed on {ns.target}; {ns.target} is supported "
+            f"as a billing source only (--source {ns.target}, with --target aws "
+            "or azure)",
+            file=out,
+        )
+        return 2
+    try:
+        target = targets.get(ns.target)
+    except TargetError as e:
+        print(f"error: {e}", file=out)
+        return 1
 
     try:
         cfg = config.default() if ns.config == "" else config.load(ns.config)
@@ -100,15 +215,16 @@ def run(args: list[str], out) -> int:
 
     try:
         p = _build_profile(
-            ns.dir,
-            ns.s3,
+            source_cloud,
+            location,
             ns.granularity,
             ns.sample,
             ns.read_footers,
             ns.detect_accounts,
             ns.all_files,
+            ns.gcp_month or ns.azure_month,
         )
-    except (profile.ProfileError, OSError) as e:
+    except (ProfileError, OSError) as e:
         print(f"error: {e}", file=out)
         return 1
 
@@ -127,23 +243,20 @@ def run(args: list[str], out) -> int:
         or "us-east-1"
     )
 
-    tier_source = ""
-    if ns.rds_from_aws:
-        try:
-            cfg.rds_tiers = rds_catalog.orderable_tiers(region, ns.rds_engine)
-            tier_source = f"orderable in {region} ({ns.rds_engine})"
-        except Exception as e:  # noqa: BLE001 — resilience: fall back on any AWS failure
-            tier_source = f"built-in defaults (AWS lookup failed: {e})"
+    tiers, tier_source = target.db_tiers(
+        cfg, live=ns.rds_from_aws, region=region, engine=ns.rds_engine
+    )
+    cfg.target(ns.target).db_tiers = tiers
 
-    rec = model.recommend(p, cfg, accounts)
-    rec.rds_tier_source = tier_source
+    rec = model.recommend(p, cfg, accounts, target, source_cloud=source_cloud)
+    rec.db_tier_source = tier_source
 
     if ns.cost:
-        # Any pricing failure degrades to the embedded snapshot inside
-        # build_price_table; this try only guards truly unexpected errors so a
-        # cost lookup can never fail the sizing run.
+        # Any pricing failure degrades to the embedded snapshot inside the
+        # adapter; this try only guards truly unexpected errors so a cost
+        # lookup can never fail the sizing run.
         try:
-            prices = pricing.build_price_table(region, rec.rds.name, ns.rds_engine)
+            prices = target.price_table(region, rec.db.name, ns.rds_engine)
             rec.cost = model.cost(rec, prices)
         except Exception as e:  # noqa: BLE001 — cost is best-effort
             print(f"warning: cost estimation skipped: {e}", file=out)
@@ -156,33 +269,27 @@ def run(args: list[str], out) -> int:
 
 
 def _build_profile(
-    dir: str,
-    s3uri: str,
+    cloud: str,
+    location: str,
     gran: str,
     sample: int,
     read_footers: bool,
     detect_accounts: bool,
     all_files: bool,
+    month: str = "",
 ):
-    # from_dir/from_s3 own the footer/sampling/account passes (that's where the
-    # I/O and progress bars live); this only picks the source and sets granularity.
-    if dir != "":
-        p = profile.from_dir(
-            dir,
-            sample=sample,
-            read_footers=read_footers,
-            detect_accounts=detect_accounts,
-            all_files=all_files,
-        )
-    else:
-        p = profile.from_s3(
-            s3uri,
-            sample=sample,
-            read_footers=read_footers,
-            detect_accounts=detect_accounts,
-            all_files=all_files,
-        )
-
+    # The source module owns the footer/sampling/account passes (that's where
+    # the I/O and progress bars live); this only picks the source and sets
+    # granularity.
+    p = sources.load(
+        cloud,
+        location,
+        sample=sample,
+        read_footers=read_footers,
+        detect_accounts=detect_accounts,
+        all_files=all_files,
+        month=month,
+    )
     if gran in ("daily", "hourly"):
         p.granularity = gran
     return p

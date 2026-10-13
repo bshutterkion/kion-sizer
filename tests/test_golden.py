@@ -35,7 +35,19 @@ def _sparse_parquet(path, size):
         f.truncate(size)
 
 
-def _check(name, args, output):
+def _scrub(output, tmp_path):
+    """Blank out the profiled location.
+
+    The JSON records which location was profiled, which for these fixtures is a
+    pytest tmp dir that differs every run. Golden files pin behavior, not paths.
+    """
+    if tmp_path is None:
+        return output
+    return output.replace(str(tmp_path), "<DIR>")
+
+
+def _check(name, args, output, tmp_path=None):
+    output = _scrub(output, tmp_path)
     GOLDEN.mkdir(exist_ok=True)
     path = GOLDEN / f"{name}.out"
     if os.environ.get("KION_SIZER_UPDATE_GOLDEN") == "1":
@@ -63,7 +75,7 @@ def test_golden_bytes_path(tmp_path, name, extra):
     _sparse_parquet(tmp_path / "x.parquet", 1 << 30)
     output, code = _run(["--dir", str(tmp_path), *extra])
     assert code == 0
-    _check(name, extra, output)
+    _check(name, extra, output, tmp_path)
 
 
 def test_golden_exceeds_tiers(tmp_path):
@@ -71,8 +83,8 @@ def test_golden_exceeds_tiers(tmp_path):
     _sparse_parquet(tmp_path / "big.parquet", 220 * (1 << 30))
     output, code = _run(["--dir", str(tmp_path), "--accounts", "700", "--json"])
     assert code == 0
-    assert '"rds_exceeds_tiers": true' in output
-    _check("exceeds_tiers_json", None, output)
+    assert '"exceeds_tiers": true' in output
+    _check("exceeds_tiers_json", None, output, tmp_path)
 
 
 def test_golden_read_footers(tmp_path):
@@ -82,7 +94,7 @@ def test_golden_read_footers(tmp_path):
         ["--dir", str(tmp_path), "--accounts", "100", "--read-footers", "--json"]
     )
     assert code == 0
-    _check("read_footers_json", None, output)
+    _check("read_footers_json", None, output, tmp_path)
 
 
 def test_golden_csv_sampling(tmp_path):
@@ -91,7 +103,7 @@ def test_golden_csv_sampling(tmp_path):
         w.write(b"h1,h2\n" + b"x,y\n" * 9000)
     output, code = _run(["--dir", str(tmp_path), "--accounts", "60", "--json"])
     assert code == 0
-    _check("csv_sampling_json", None, output)
+    _check("csv_sampling_json", None, output, tmp_path)
 
 
 def test_golden_no_source_error():

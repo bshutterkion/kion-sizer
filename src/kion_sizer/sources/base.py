@@ -1,16 +1,20 @@
-"""Turns a customer CUR (local dir or S3) into a CURProfile."""
+"""Cloud-agnostic billing-profile machinery.
+
+Everything here works on any source that can hand back byte-sized records
+with a line iterator (_CsvRec) or a list of parquet paths: stratified
+sampling, the parallel scan, account detection, and footer reads. The
+per-cloud modules beside this one supply those records.
+"""
 
 from __future__ import annotations
 
 import gzip
-import io
-import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
-from . import progress
+from .. import progress
 
 
 class ProfileError(Exception):
@@ -21,9 +25,32 @@ def _warn(msg: str) -> None:
     print(f"warning: {msg}", file=sys.stderr)
 
 
+def missing_sdk(cloud: str, package: str) -> None:
+    """Raise a ProfileError telling the user exactly how to install the SDK.
+
+    An ImportError traceback from deep inside a lazy import tells a field
+    engineer nothing; this names the extra to install.
+    """
+    raise ProfileError(
+        f"the {cloud} source needs the {package!r} package, which is not "
+        f"installed. Install it with: uv sync --extra {cloud}"
+    )
+
+
 @dataclass
-class CURProfile:
+class BillingProfile:
     source: str = ""
+    # Which cloud this billing data came from, and how to describe its units.
+    # Set by the source module; render uses them so a non-file source is not
+    # described as "files".
+    cloud: str = "aws"
+    unit_label: str = "files"
+    byte_label: str = "compressed bytes"
+    volume_note: str = ""
+    # Which report format this is: cur / dbr / focus / standard / detailed /
+    # usage-details / ... Row volume depends on the format as much as on the
+    # provider, so calibration resolves on the (cloud, report_format) pair.
+    report_format: str = ""
     file_count: int = 0
     compressed_bytes: int = 0
     raw_line_items: int = 0
@@ -42,7 +69,7 @@ class CURProfile:
     def set_format_flags(self, ext: str) -> None:
         if ext == "parquet":
             self.has_parquet = True
-        elif ext in ("csv", "csv.gz"):
+        elif ext in ("csv", "csv.gz", "csv.zip"):
             self.has_csv = True
 
 
@@ -52,6 +79,8 @@ def data_ext(name: str) -> str:
         return "parquet"
     if n.endswith(".csv.gz"):
         return "csv.gz"
+    if n.endswith(".csv.zip"):
+        return "csv.zip"  # AWS DBR ships this way
     if n.endswith(".csv"):
         return "csv"
     return ""
@@ -63,61 +92,6 @@ def merge_format(cur: str, nxt: str) -> str:
     return "mixed"
 
 
-def from_dir(
-    dir: str,
-    *,
-    sample: int = 20,
-    read_footers: bool = False,
-    detect_accounts: bool = False,
-    all_files: bool = False,
-) -> CURProfile:
-    p = CURProfile(source=dir, granularity="unknown")
-    for root, _, files in os.walk(dir):
-        for name in files:
-            ext = data_ext(name)
-            if ext == "":
-                continue
-            size = os.path.getsize(os.path.join(root, name))
-            p.file_count += 1
-            p.compressed_bytes += size
-            p.format = merge_format(p.format, ext)
-            p.set_format_flags(ext)
-    if p.file_count == 0:
-        raise ProfileError(f'no .parquet/.csv/.csv.gz files found under "{dir}"')
-
-    csv_recs = _dir_csv_recs(dir)
-    csv_accounts = None
-    if read_footers and p.has_parquet and not p.has_csv:
-        try:
-            p.raw_line_items = read_footer_rows(dir)
-            p.have_raw_rows = True
-        except Exception as e:  # noqa: BLE001 — degrade to the bytes-only estimate
-            _warn(f"parquet footer read failed ({e}); using bytes estimate")
-    elif p.has_csv and not p.has_parquet:
-        est, sampled, total, csv_accounts = scan_csv(
-            csv_recs, sample, detect_accounts, all_files
-        )
-        p.raw_line_items, p.have_raw_rows = est, True
-        p.sample_note = (
-            f"exact count from all {total} files"
-            if all_files
-            else f"ESTIMATED by sampling {sampled} of {total} files "
-            "(extrapolated by byte share)"
-        )
-    if detect_accounts:
-        try:
-            _apply_accounts(
-                p,
-                sample,
-                _dir_parquet_paths(dir),
-                csv_recs,
-                csv_accounts,
-                None,
-                all_files,
-            )
-        except Exception as e:  # noqa: BLE001 — account detection is best-effort
-            _warn(f"account detection failed ({e}); skipping")
-    return p
 
 
 # --- CSV sampling (Task 5) -------------------------------------------------
@@ -159,14 +133,22 @@ def _stratified(items: list, n: int) -> list:
     return [items[i] for i in idxs]
 
 
-def _scan_one(rec: "_CsvRec", detect_accounts: bool) -> tuple[int, set | None]:
+def _scan_one(
+    rec: "_CsvRec", detect_accounts: bool, row_filter=None
+) -> tuple[int, set | None]:
     """Read one CSV file exactly once. Returns (data_row_count, account_ids).
 
     account_ids is None when detection is off (the fast line-count path); when on,
     a single csv parse yields both the row count and the account column values.
+
+    `row_filter(header, row) -> bool` drops rows the product would not ingest --
+    AWS DBR files carry AccountTotal / InvoiceTotal / StatementTotal / Rounding
+    rows alongside real line items, and counting those would over-size. Supplying
+    a filter forces the parsing path even when accounts are not wanted, because
+    lines cannot be filtered without being parsed.
     """
     reader = rec.open_lines()
-    if not detect_accounts:
+    if not detect_accounts and row_filter is None:
         return count_rows_from_reader(reader), None
     import csv
 
@@ -180,10 +162,12 @@ def _scan_one(rec: "_CsvRec", detect_accounts: bool) -> tuple[int, set | None]:
     rows = 0
     ids: set = set()
     for row in r:
+        if row_filter is not None and not row_filter(header, row):
+            continue
         rows += 1
         if idx is not None and idx < len(row):
             ids.add(row[idx])
-    return rows, ids
+    return rows, (ids if detect_accounts else None)
 
 
 # Bounded so a fleet of large gzip files (each buffered compressed in memory) can't
@@ -196,13 +180,16 @@ def scan_csv(
     max_sample: int,
     detect_accounts: bool = False,
     all_files: bool = False,
+    row_filter=None,
+    unit: str = "CUR files",
 ) -> tuple[int, int, int, set | None]:
     """Read CSV files (each exactly once, in parallel) to estimate total raw rows
     by byte share and, when detect_accounts is set, collect distinct account IDs
     from the files read. With all_files the whole set is read (exact rows, and an
     exact account count); otherwise a stratified sample per format is read and the
     result is an estimate / account lower bound. Returns
-    (est_rows, sampled, total, accounts_or_None).
+    (est_rows, sampled, total, accounts_or_None). `unit` names what is being
+    read, for the progress bar only.
     """
     if max_sample <= 0:
         max_sample = 3
@@ -222,9 +209,11 @@ def scan_csv(
         plan.append((group_bytes, sel))
     selected = [r for _, sel in plan for r in sel]
 
-    desc = "reading all CUR files" if all_files else "sampling CUR files"
+    # `unit` matches the profile's unit_label, so an Azure run says "blobs" and
+    # an OCI run says "reports" rather than claiming to read a CUR.
+    desc = f"reading all {unit}" if all_files else f"sampling {unit}"
     results = _parallel(
-        lambda rec: _scan_one(rec, detect_accounts),
+        lambda rec: _scan_one(rec, detect_accounts, row_filter),
         selected,
         desc,
         workers=_CSV_SCAN_WORKERS,
@@ -247,21 +236,11 @@ def scan_csv(
     return est, sampled, total, accounts
 
 
-def sample_dir_raw_rows(dir: str, max_sample: int) -> tuple[int, int, int]:
-    est, sampled, total, _ = scan_csv(_dir_csv_recs(dir), max_sample)
-    return est, sampled, total
 
 
 # --- parquet footers (Task 6) ----------------------------------------------
 
 
-def _dir_parquet_paths(dir: str) -> list[str]:
-    out = []
-    for root, _, files in os.walk(dir):
-        for name in files:
-            if name.lower().endswith(".parquet"):
-                out.append(os.path.join(root, name))
-    return out
 
 
 def _parallel(fn: Callable, items: list, desc: str, workers: int = 16) -> list:
@@ -287,23 +266,39 @@ def parquet_footer_rows(paths: list[str], filesystem=None) -> int:
     return sum(_parallel(one, paths, "reading parquet footers"))
 
 
-def read_footer_rows(dir: str) -> int:
-    """Sum num_rows from every *.parquet footer under a local dir."""
-    return parquet_footer_rows(_dir_parquet_paths(dir))
 
 
 # --- account auto-detection ------------------------------------------------
 # Distinct line-item usage-account IDs = the deployment's member-account count.
-_ACCOUNT_COLUMNS = ("line_item_usage_account_id", "lineItem/UsageAccountId")
+# Every account-identity column we may meet, in preference order. A single file
+# only ever carries one of these, so trying them all lets one scanner serve AWS
+# CUR, Azure usage details (EA and MCA spell it differently), and FOCUS from any
+# provider. This mirrors how Kion's own parser resolves aliases: case-insensitive,
+# first match wins.
+_ACCOUNT_COLUMNS = (
+    "line_item_usage_account_id",   # AWS CUR (parquet)
+    "lineItem/UsageAccountId",      # AWS CUR (CSV)
+    "SubAccountId",                 # FOCUS, any provider
+    "SubscriptionId",               # Azure usage details (EA)
+    "SubscriptionGuid",             # Azure usage details (MCA)
+    "LinkedAccountId",              # AWS DBR (legacy)
+    "product/compartmentId",        # OCI cost report -- Kion maps compartment to account
+    "lineItem/tenantId",            # OCI cost report -- single-tenancy fallback
+)
 
 
 def _pick_account_col(names) -> str | None:
     for c in _ACCOUNT_COLUMNS:
         if c in names:
             return c
-    target = "lineitemusageaccountid"
+    # Fall back to a separator-insensitive comparison, so lineItem/UsageAccountId
+    # and line_item_usage_account_id match the same target.
+    def norm(s):
+        return s.lower().replace("/", "").replace("_", "")
+
+    targets = {norm(c) for c in _ACCOUNT_COLUMNS}
     for n in names:
-        if n.lower().replace("/", "").replace("_", "") == target:
+        if norm(n) in targets:
             return n
     return None
 
@@ -354,32 +349,12 @@ class _CsvRec:
     open_lines: Callable[[], object]
 
 
-def _dir_csv_recs(dir: str) -> list:
-    recs = []
-    for root, _, files in os.walk(dir):
-        for name in files:
-            ext = data_ext(name)
-            if ext not in ("csv", "csv.gz"):
-                continue
-            path = os.path.join(root, name)
-            recs.append(
-                _CsvRec(
-                    ext=ext,
-                    size=os.path.getsize(path),
-                    open_lines=(lambda p=path: _open_local_lines(p)),
-                )
-            )
-    return recs
 
 
-def _open_local_lines(path: str):
-    if path.lower().endswith(".gz"):
-        return gzip.open(path, "rb")
-    return open(path, "rb")
 
 
 def _apply_accounts(
-    p: CURProfile,
+    p: BillingProfile,
     sample: int,
     parquet_paths: list,
     csv_recs: list,
@@ -416,143 +391,25 @@ def _apply_accounts(
 # --- S3 (Task 7) -----------------------------------------------------------
 
 
-@dataclass
-class S3Obj:
-    key: str
-    size: int
 
 
-def base_name(key: str) -> str:
-    idx = key.rfind("/")
-    return key[idx + 1 :] if idx >= 0 else key
 
 
-def parse_s3_uri(uri: str) -> tuple[str, str]:
-    if not uri.startswith("s3://"):
-        raise ProfileError(f'not an s3 uri: "{uri}"')
-    rest = uri[len("s3://") :]
-    bucket, _, prefix = rest.partition("/")
-    if bucket == "":
-        raise ProfileError(f'missing bucket in "{uri}"')
-    return bucket, prefix
 
 
-def profile_from_objs(objs: list, source: str) -> CURProfile:
-    p = CURProfile(source=source, granularity="unknown")
-    for o in objs:
-        ext = data_ext(base_name(o.key))
-        if ext == "":
-            continue
-        p.file_count += 1
-        p.compressed_bytes += o.size
-        p.format = merge_format(p.format, ext)
-        p.set_format_flags(ext)
-    if p.file_count == 0:
-        raise ProfileError(f"no .parquet/.csv/.csv.gz objects in {source}")
-    return p
 
 
-def profile_from_lister(lister, bucket: str, prefix: str, source: str) -> CURProfile:
-    objs = lister.list(bucket, prefix)
-    return profile_from_objs(objs, source)
 
 
-def _aws_list(client, bucket: str, prefix: str) -> list:
-    out = []
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for o in page.get("Contents", []):
-            out.append(S3Obj(o["Key"], o["Size"]))
-    return out
 
 
-def _resolve_region(client, bucket: str) -> str:
-    # GetBucketLocation returns None/"" for us-east-1.
-    resp = client.get_bucket_location(Bucket=bucket)
-    return resp.get("LocationConstraint") or "us-east-1"
 
 
-def _sample_s3_raw_rows(client, bucket: str, objs: list, max_sample: int):
-    est, sampled, total, _ = scan_csv(_s3_csv_recs(client, bucket, objs), max_sample)
-    return est, sampled, total
 
 
-def _s3_csv_lines(client, bucket: str, key: str):
-    body = client.get_object(Bucket=bucket, Key=key)["Body"]
-    if key.lower().endswith(".gz"):
-        return gzip.GzipFile(fileobj=io.BytesIO(body.read()))
-    # StreamingBody iterates 1 KiB chunks, not lines; iter_lines() yields lines.
-    return body.iter_lines()
 
 
-def _s3_csv_recs(client, bucket: str, objs: list) -> list:
-    recs = []
-    for o in objs:
-        ext = data_ext(base_name(o.key))
-        if ext not in ("csv", "csv.gz"):
-            continue
-        recs.append(
-            _CsvRec(
-                ext=ext,
-                size=o.size,
-                open_lines=(lambda k=o.key: _s3_csv_lines(client, bucket, k)),
-            )
-        )
-    return recs
 
 
-def _s3_filesystem(region: str):
-    import pyarrow.fs as pafs
-
-    return pafs.S3FileSystem(region=region)
 
 
-def from_s3(
-    uri: str,
-    *,
-    sample: int = 20,
-    read_footers: bool = False,
-    detect_accounts: bool = False,
-    all_files: bool = False,
-) -> CURProfile:
-    import boto3
-
-    bucket, prefix = parse_s3_uri(uri)
-    loc_client = boto3.client("s3", region_name="us-east-1")
-    region = _resolve_region(loc_client, bucket)
-    client = boto3.client("s3", region_name=region)
-
-    objs = _aws_list(client, bucket, prefix)
-    p = profile_from_objs(objs, uri)
-
-    parquet_keys = [
-        f"{bucket}/{o.key}" for o in objs if data_ext(base_name(o.key)) == "parquet"
-    ]
-    csv_recs = _s3_csv_recs(client, bucket, objs)
-    csv_accounts = None
-    if read_footers and p.has_parquet and not p.has_csv:
-        try:
-            p.raw_line_items = parquet_footer_rows(parquet_keys, _s3_filesystem(region))
-            p.have_raw_rows = True
-        except Exception as e:  # noqa: BLE001 — degrade to the bytes-only estimate
-            _warn(f"S3 parquet footer read failed ({e}); using bytes estimate")
-    elif p.has_csv and not p.has_parquet:
-        raw, sampled, total, csv_accounts = scan_csv(
-            csv_recs, sample, detect_accounts, all_files
-        )
-        p.raw_line_items, p.have_raw_rows = raw, True
-        p.sample_note = (
-            f"exact count from all {total} S3 files"
-            if all_files
-            else f"ESTIMATED by sampling {sampled} of {total} S3 files "
-            "(extrapolated by byte share)"
-        )
-    if detect_accounts:
-        try:
-            fs = _s3_filesystem(region) if p.has_parquet else None
-            _apply_accounts(
-                p, sample, parquet_keys, csv_recs, csv_accounts, fs, all_files
-            )
-        except Exception as e:  # noqa: BLE001 — account detection is best-effort
-            _warn(f"account detection failed ({e}); skipping")
-    return p

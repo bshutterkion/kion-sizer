@@ -10,7 +10,8 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
-from kion_sizer import profile
+from kion_sizer.sources import aws
+from kion_sizer.sources import base as profile
 
 
 def _write_parquet(path, accounts, n_extra=0):
@@ -70,7 +71,7 @@ def test_csv_account_ids_no_column():
 def test_from_dir_detect_accounts_parquet_exact(tmp_path):
     _write_parquet(str(tmp_path / "a.parquet"), ["100", "100", "200"])
     _write_parquet(str(tmp_path / "b.parquet"), ["300"])
-    p = profile.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
+    p = aws.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
     assert p.raw_line_items == 4  # exact footer rows
     assert p.account_count == 3  # {100,200,300}
     assert p.account_lower_bound is False
@@ -99,13 +100,28 @@ def test_scan_csv_reads_each_file_once_when_detecting():
 
 
 def test_from_dir_detect_accounts_csv_lower_bound(tmp_path):
+    # Three same-format files, sample of 1: some files go unread, so the count
+    # can only be a lower bound.
+    for i, ids in enumerate(((b"100", b"200", b"201"), (b"300",), (b"400",))):
+        body = b"lineItem/UsageAccountId,c\n" + b"".join(a + b",1\n" for a in ids)
+        (tmp_path / f"{i}.csv").write_bytes(body)
+    p = aws.from_dir(str(tmp_path), detect_accounts=True, sample=1)
+    assert p.account_count < 5
+    assert p.account_lower_bound is True
+    assert p.account_source == "CSV sample"
+
+
+def test_a_sample_that_reaches_every_file_is_exact(tmp_path):
+    # Two files and the default sample of 20: every file is read, so this is a
+    # full read and must not be labeled a lower bound or an estimate.
     (tmp_path / "a.csv").write_bytes(b"lineItem/UsageAccountId,c\n100,1\n200,2\n")
     with gzip.open(tmp_path / "b.csv.gz", "wb") as w:
         w.write(b"lineItem/UsageAccountId,c\n300,9\n")
-    p = profile.from_dir(str(tmp_path), detect_accounts=True)
+    p = aws.from_dir(str(tmp_path), detect_accounts=True)
     assert p.account_count == 3
-    assert p.account_lower_bound is True
-    assert p.account_source == "CSV sample"
+    assert p.account_lower_bound is False
+    assert p.account_source == "CSV (exact)"
+    assert "ESTIMATED" not in p.sample_note
 
 
 def test_all_files_reads_everything_exact(tmp_path):
@@ -115,7 +131,7 @@ def test_all_files_reads_everything_exact(tmp_path):
         (tmp_path / f"f{i:02d}.csv").write_bytes(
             f"lineItem/UsageAccountId,c\n{1000 + i},1\n".encode()
         )
-    p = profile.from_dir(str(tmp_path), sample=20, detect_accounts=True, all_files=True)
+    p = aws.from_dir(str(tmp_path), sample=20, detect_accounts=True, all_files=True)
     assert p.account_count == 30  # every distinct account, not a sampled subset
     assert p.account_lower_bound is False
     assert p.account_source == "CSV (exact)"
@@ -142,7 +158,7 @@ def test_scan_csv_parallel_results_match_sequential(tmp_path):
 
 def test_detect_accounts_off_by_default(tmp_path):
     _write_parquet(str(tmp_path / "a.parquet"), ["100"])
-    p = profile.from_dir(str(tmp_path))
+    p = aws.from_dir(str(tmp_path))
     assert p.have_accounts is False
     assert p.account_count == 0
 
@@ -151,7 +167,7 @@ def test_corrupt_parquet_degrades_without_crashing(tmp_path, capsys):
     # A non-parquet file with a .parquet name must not blow up the run: footers
     # fall back to the bytes estimate and account detection is skipped.
     (tmp_path / "bad.parquet").write_bytes(b"not a parquet file")
-    p = profile.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
+    p = aws.from_dir(str(tmp_path), read_footers=True, detect_accounts=True)
     assert p.have_raw_rows is False  # degraded to bytes path
     assert p.have_accounts is False  # detection skipped
     assert "failed" in capsys.readouterr().err  # warned on stderr

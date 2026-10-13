@@ -6,6 +6,7 @@ x86 $732.39, EC2 alt x2gd.2xlarge $487.64 (cheapest) / r8g.2xlarge $344.03.
 """
 
 from kion_sizer import config, model, pricing
+from kion_sizer.targets.base import ComputeShape
 
 
 def _snapshot_prices(rds_class):
@@ -17,11 +18,15 @@ def _rec(rds_name, ram, poller_vcpu, poller_mem, task_vcpu, task_mem, accounts=0
         pass
 
     rec = model.Recommendation(profile=P())
-    rec.rds = config.InstanceTier(rds_name, ram)
+    rec.db = config.InstanceTier(rds_name, ram)
     rec.poller_vcpu = poller_vcpu
     rec.poller_mem_gib = poller_mem
-    rec.poller_task_vcpu = task_vcpu
-    rec.poller_task_mem_gib = task_mem
+    rec.compute = ComputeShape(
+        kind="fargate_task",
+        vcpu=task_vcpu,
+        mem_gib=task_mem,
+        cpu_units=int(task_vcpu * 1024),
+    )
     if accounts:
         cfg = config.default()
         rec.services = model.pick_band(cfg.service_bands, accounts)

@@ -1,6 +1,7 @@
-"""Runs the hermetic cloudshell.sh discovery tests (tests/test_cloudshell.sh)
-under pytest, so `uv run pytest` covers both the Python logic and the shell
-discovery glue. The bash script puts a fake `aws` on PATH; no real AWS is used.
+"""Runs the hermetic Cloud Shell discovery tests under pytest, so `uv run
+pytest` covers the Python logic and the shell discovery glue for all three
+clouds. Each bash script puts fake CLIs (aws / az / gcloud + bq) on PATH; no
+real cloud is used.
 """
 
 import shutil
@@ -9,10 +10,14 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).parent / "test_cloudshell.sh"
+_HERE = Path(__file__).parent
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_cloudshell_discovery():
-    res = subprocess.run(["bash", str(_SCRIPT)], capture_output=True, text=True)
+@pytest.mark.parametrize(
+    "script",
+    ["test_cloudshell.sh", "test_azure_cloudshell.sh", "test_gcp_cloudshell.sh"],
+)
+def test_cloudshell_discovery(script):
+    res = subprocess.run(["bash", str(_HERE / script)], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr

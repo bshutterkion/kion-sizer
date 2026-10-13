@@ -55,6 +55,77 @@ live progress. `--json` emits the whole thing, cost included, as JSON.
 Uses the CloudShell session's ambient credentials. The CUR's S3 bucket region is
 auto-resolved (customer buckets are not always `us-east-1`).
 
+## Quickstart — Azure Cloud Shell
+
+Kion runs on Azure as well as AWS, and Azure billing can be sized for either.
+Open **Azure Cloud Shell** (Bash) signed into the tenant whose Cost Management
+export you want to size, then:
+
+```sh
+git clone https://github.com/bshutterkion/kion-sizer.git
+cd kion-sizer
+bash scripts/azure-cloudshell.sh
+```
+
+The script:
+
+1. **Discovers the export** — Cost Management exports at every billing account
+   and enabled subscription you can see, preferring actual-cost exports, then
+   FOCUS, then amortized. EA and MCA exports are usually defined at the
+   enrollment scope, which an operator with storage access often cannot see, so
+   when no export definition is visible it searches storage accounts with
+   billing-like names for blobs laid out the way Cost Management writes them.
+   Government and China clouds work: endpoints come from `az cloud show`.
+2. **Checks blob access** — the tool reads as your identity, which needs
+   **Storage Blob Data Reader** on the container. Owner or Contributor does not
+   grant that. If you lack it but can read the account key, the script mints a
+   2-hour read/list SAS token for that one container and hands it to the tool
+   through `KION_SIZER_AZURE_SAS`, never on the command line (`--no-sas` turns
+   this off).
+3. **Sizes it** — the peak billing period, counting only the newest copy of it
+   (exports accumulate one copy per run).
+
+```sh
+bash scripts/azure-cloudshell.sh --export NAME     # pick an export by name
+bash scripts/azure-cloudshell.sh --container URL   # skip discovery
+bash scripts/azure-cloudshell.sh --month 202606    # size this billing period
+bash scripts/azure-cloudshell.sh --accounts 150 --json
+bash scripts/azure-cloudshell.sh --dry-run         # print the resolved command only
+```
+
+## Quickstart — Google Cloud Shell
+
+Kion is not deployed on GCP, so GCP is a billing **source** only: this sizes the
+AWS deployment that will import the GCP spend. Open **Google Cloud Shell**, then:
+
+```sh
+git clone https://github.com/bshutterkion/kion-sizer.git
+cd kion-sizer
+bash scripts/gcp-cloudshell.sh
+```
+
+The script finds the BigQuery billing export table — in the current project, then
+in every project you can list (`--max-projects`, default 50). When it finds more
+than one it prefers the **detailed** export, then standard, then FOCUS, and logs
+every candidate. Detailed is the conservative choice: for the same spend it
+produces roughly 16× the database rows of a standard export. If Kion is set up to
+ingest a different export, name it with `--table`.
+
+Row and project counts come from BigQuery metadata plus one aggregate query, so
+they are exact and no row data is read. Needs **BigQuery Data Viewer** on the
+export dataset and **BigQuery Job User** in the billing project.
+
+```sh
+bash scripts/gcp-cloudshell.sh --table PROJECT.DATASET.TABLE   # skip discovery
+bash scripts/gcp-cloudshell.sh --project PROJECT               # search here first
+bash scripts/gcp-cloudshell.sh --month 202606                  # size this billing month
+bash scripts/gcp-cloudshell.sh --accounts 150 --json
+bash scripts/gcp-cloudshell.sh --dry-run
+```
+
+Neither Azure nor GCP Cloud Shell has AWS credentials, so `--cost` prices from
+the embedded us-east-1 snapshot and the output says so.
+
 ## Running the tool directly
 
 If you already have a checkout and `uv`:
@@ -66,7 +137,15 @@ uv run kion-sizer --dir /path/to/cur-month/ --accounts 150 --read-footers --json
 
 | Flag | Meaning |
 |------|---------|
+| `--source aws\|azure\|gcp\|oci\|custom` | Billing data source. Inferred from the location flag; `--dir` defaults to `aws`. |
+| `--target aws\|azure` | Deployment target to size for. Defaults to `aws`. Only `aws` is implemented so far; `gcp` is rejected because Kion is not deployed there. |
 | `--s3 s3://…/` | Size a CUR month in S3 (auto-resolves bucket region). |
+| `--gcp-table P.D.T` | Size a GCP BigQuery billing export (`PROJECT.DATASET.TABLE`). Implies `--source gcp`. |
+| `--azure-container URL` | Size an Azure Cost Management export (`https://<acct>.blob.core.windows.net/<container>/<path>`). |
+| `--azure-month YYYYMM` | Billing period to size (default: the peak period by bytes). |
+| `--oci-bucket URL` | Size OCI cost reports (`https://objectstorage.<region>.oraclecloud.com/n/<ns>/b/<bucket>/o/<prefix>`). |
+| `--custom-source LOC` | Size a custom billing source (`s3://bucket/prefix/`, or an Azure blob URL). Always FOCUS-formatted. |
+| `--gcp-month YYYYMM` | Billing month to size (default: the peak month by row count). |
 | `--dir PATH` | Size a locally-downloaded CUR month. |
 | `--accounts N` | Core/compliance service bands for N AWS accounts. Overrides `--detect-accounts`. |
 | `--detect-accounts` | Auto-detect the member-account count from the CUR's `line_item_usage_account_id` column — **exact** for parquet, a labeled **lower bound** from the CSV sample. Feeds the service bands when `--accounts` isn't given. `cloudshell.sh` enables this by default. |
@@ -113,12 +192,49 @@ counts. Because the estimate only picks an instance *tier* (which is quantized),
 the sample is almost always enough; `--all-files` is there for when you want the
 exact numbers and don't mind the wait.
 
+## Billing sources
+
+Every billing source Kion ingests in bulk can be profiled, and the report format
+is detected from the data rather than declared:
+
+| Source | Flag | Formats |
+|---|---|---|
+| AWS | `--dir` / `--s3` | CUR, legacy DBR, FOCUS |
+| Azure | `--azure-container` | usage details (EA/MCA), FOCUS |
+| GCP | `--gcp-table` | standard, detailed, FOCUS |
+| OCI | `--oci-bucket` | cost reports, FOCUS |
+| Custom | `--custom-source` | FOCUS (in S3 or Azure blob) |
+
+Kion is deployed on AWS and Azure only, so GCP and OCI customers pair their
+billing source with `--target aws` or `--target azure`.
+
+## Sizing GCP spend
+
+Kion is not deployed on GCP, so a GCP-billed customer runs Kion on AWS (or, once
+supported, Azure) and imports that spend. That is `--source gcp` with an AWS
+target:
+
+```sh
+uv sync --extra gcp
+uv run kion-sizer --gcp-table my-proj.billing.gcp_billing_export_resource_v1_01ABCD --json
+```
+
+Row counts and the member-account count come straight from BigQuery metadata, so
+they are **exact** — no sampling, and `--read-footers` / `--all-files` /
+`--sample` do not apply. The peak billing month is chosen by `invoice.month`
+row count unless `--gcp-month` names one.
+
+Note that the GCP calibration constants are currently inherited from the AWS
+reference rather than measured, and every run says so.
+
 ## Development
 
 ```sh
-uv sync --extra dev
+uv sync --extra dev          # dev pulls every implemented cloud
 uv run pytest -q                 # Python unit + golden + discovery tests
 bash tests/test_cloudshell.sh    # cloudshell.sh discovery tests (also under pytest)
+bash tests/test_azure_cloudshell.sh  # azure-cloudshell.sh discovery tests
+bash tests/test_gcp_cloudshell.sh    # gcp-cloudshell.sh discovery tests
 bash tests/env/run.sh            # amazonlinux:2023 environment-fidelity test (needs Docker)
 ```
 

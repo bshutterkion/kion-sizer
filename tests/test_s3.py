@@ -1,6 +1,6 @@
 import pytest
 
-from kion_sizer import profile
+from kion_sizer.sources import aws as profile
 
 
 class FakeLister:
